@@ -1,0 +1,960 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-23T12:08:26+00:00",
+  "title": "Design System: AMC — Plateforme maritime",
+  "extensions": {
+    "colorMeta": {
+      "navy": {
+        "role": "secondary",
+        "displayName": "Logbook Ink",
+        "canonical": "#102B44",
+        "oklch": "oklch(28.2% 0.057 249.0)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "navy-950": {
+        "role": "secondary",
+        "displayName": "Night Watch Navy",
+        "canonical": "#0B1F33",
+        "oklch": "oklch(23.4% 0.047 250.5)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "navy-700": {
+        "role": "secondary",
+        "displayName": "Logbook Ink Hover",
+        "canonical": "#214B65",
+        "oklch": "oklch(39.5% 0.064 238.5)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "navy-600": {
+        "role": "secondary",
+        "displayName": "Faded Logbook Ink",
+        "canonical": "#2F5F7B",
+        "oklch": "oklch(46.4% 0.069 236.5)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "navy-100": {
+        "role": "secondary",
+        "displayName": "Navy Mist",
+        "canonical": "#DCE5EC",
+        "oklch": "oklch(91.7% 0.014 241.0)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "navy-50": {
+        "role": "secondary",
+        "displayName": "Navy Wash",
+        "canonical": "#EDF2F6",
+        "oklch": "oklch(95.9% 0.008 241.7)",
+        "tonalRamp": [
+          "#0B1F33",
+          "#102B44",
+          "#173753",
+          "#214B65",
+          "#2F5F7B",
+          "#8DA9BC",
+          "#DCE5EC",
+          "#EDF2F6"
+        ]
+      },
+      "action": {
+        "role": "primary",
+        "displayName": "Ledger Ocean",
+        "canonical": "#176A79",
+        "oklch": "oklch(48.4% 0.078 213.0)",
+        "tonalRamp": [
+          "#000E12",
+          "#002A31",
+          "#034854",
+          "#156978",
+          "#418C9C",
+          "#67B2C2",
+          "#8DD8E9",
+          "#D1F6FF"
+        ]
+      },
+      "action-700": {
+        "role": "primary",
+        "displayName": "Deep Ledger Ocean",
+        "canonical": "#105562",
+        "oklch": "oklch(41.5% 0.067 213.8)",
+        "tonalRamp": [
+          "#000E13",
+          "#002A32",
+          "#034854",
+          "#286775",
+          "#4D8B99",
+          "#72B0BE",
+          "#97D7E5",
+          "#D3F6FE"
+        ]
+      },
+      "action-100": {
+        "role": "primary",
+        "displayName": "Ocean Ring",
+        "canonical": "#D3E9EC",
+        "oklch": "oklch(91.9% 0.024 206.6)",
+        "tonalRamp": [
+          "#010E10",
+          "#16272A",
+          "#314346",
+          "#4E6264",
+          "#708587",
+          "#94A9AC",
+          "#BACFD2",
+          "#DDF3F6"
+        ]
+      },
+      "action-50": {
+        "role": "primary",
+        "displayName": "Ocean Wash",
+        "canonical": "#ECF5F6",
+        "oklch": "oklch(96.4% 0.010 204.9)",
+        "tonalRamp": [
+          "#070C0D",
+          "#1F2526",
+          "#3A4142",
+          "#585F60",
+          "#7A8283",
+          "#9EA6A7",
+          "#C4CCCD",
+          "#E7F0F1"
+        ]
+      },
+      "teal": {
+        "role": "tertiary",
+        "displayName": "Waterline Teal",
+        "canonical": "#1B9AAA",
+        "oklch": "oklch(63.0% 0.103 208.4)",
+        "tonalRamp": [
+          "#000E11",
+          "#002A30",
+          "#044951",
+          "#0B6A75",
+          "#0091A1",
+          "#44B6C7",
+          "#6FDDEE",
+          "#CCF8FF"
+        ]
+      },
+      "teal-700": {
+        "role": "tertiary",
+        "displayName": "Deep Waterline",
+        "canonical": "#0F6E7A",
+        "oklch": "oklch(49.4% 0.081 208.5)",
+        "tonalRamp": [
+          "#000E12",
+          "#012A2F",
+          "#024951",
+          "#056A76",
+          "#3A8E9A",
+          "#62B3C0",
+          "#88DAE7",
+          "#CDF7FE"
+        ]
+      },
+      "teal-100": {
+        "role": "tertiary",
+        "displayName": "Waterline Mist",
+        "canonical": "#D3EEF1",
+        "oklch": "oklch(93.0% 0.029 204.8)",
+        "tonalRamp": [
+          "#000E11",
+          "#12282B",
+          "#2D4447",
+          "#4B6365",
+          "#6D8588",
+          "#91AAAD",
+          "#B6D0D3",
+          "#D9F5F8"
+        ]
+      },
+      "teal-50": {
+        "role": "tertiary",
+        "displayName": "Waterline Wash",
+        "canonical": "#EBF7F8",
+        "oklch": "oklch(96.7% 0.013 202.9)",
+        "tonalRamp": [
+          "#050D0E",
+          "#1D2627",
+          "#384243",
+          "#566061",
+          "#788383",
+          "#9CA7A8",
+          "#C1CDCE",
+          "#E5F1F2"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Chart Room Canvas",
+        "canonical": "#F3F6F8",
+        "oklch": "oklch(97.1% 0.004 236.5)",
+        "tonalRamp": [
+          "#0A0B0D",
+          "#222426",
+          "#3E4042",
+          "#5B5E60",
+          "#7E8182",
+          "#A2A5A7",
+          "#C8CBCD",
+          "#ECEFF1"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#FFFFFF",
+        "oklch": "oklch(100.0% 0.000 89.9)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#242424",
+          "#404040",
+          "#5D5D5D",
+          "#808080",
+          "#A4A4A4",
+          "#CACACA",
+          "#EEEEEE"
+        ]
+      },
+      "surface-sunken": {
+        "role": "neutral",
+        "displayName": "Sunken Paper",
+        "canonical": "#F7F9FA",
+        "oklch": "oklch(98.1% 0.003 228.8)",
+        "tonalRamp": [
+          "#0A0B0C",
+          "#232425",
+          "#3E4041",
+          "#5C5E5F",
+          "#7F8081",
+          "#A3A5A6",
+          "#C9CBCC",
+          "#EDEFF0"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#1F2D3A",
+        "oklch": "oklch(29.1% 0.031 247.0)",
+        "tonalRamp": [
+          "#020C17",
+          "#182532",
+          "#33414F",
+          "#50606E",
+          "#728292",
+          "#96A7B7",
+          "#BBCDDE",
+          "#E2F1FF"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#556677",
+        "oklch": "oklch(50.3% 0.034 248.5)",
+        "tonalRamp": [
+          "#020C19",
+          "#162534",
+          "#324151",
+          "#4F6070",
+          "#718294",
+          "#94A7BA",
+          "#BACDE0",
+          "#E3F0FE"
+        ]
+      },
+      "ink-soft": {
+        "role": "neutral",
+        "displayName": "Faint Ink",
+        "canonical": "#687786",
+        "oklch": "oklch(56.2% 0.029 248.3)",
+        "tonalRamp": [
+          "#030C17",
+          "#192532",
+          "#34414F",
+          "#515F6E",
+          "#738291",
+          "#97A7B7",
+          "#BCCDDD",
+          "#E3F0FE"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#DCE3E9",
+        "oklch": "oklch(91.2% 0.011 243.7)",
+        "tonalRamp": [
+          "#070C10",
+          "#202529",
+          "#3B4145",
+          "#585E64",
+          "#7B8186",
+          "#9FA6AB",
+          "#C5CBD1",
+          "#E8EFF6"
+        ]
+      },
+      "line-strong": {
+        "role": "neutral",
+        "displayName": "Strong Hairline",
+        "canonical": "#C3CED8",
+        "oklch": "oklch(84.6% 0.018 245.4)",
+        "tonalRamp": [
+          "#050C12",
+          "#1D252D",
+          "#384149",
+          "#555F68",
+          "#77828B",
+          "#9BA6B0",
+          "#C1CCD6",
+          "#E5F0FA"
+        ]
+      },
+      "ok": {
+        "role": "status",
+        "displayName": "Clearance Green",
+        "canonical": "#08703F",
+        "oklch": "oklch(48.0% 0.116 154.9)",
+        "tonalRamp": [
+          "#001004",
+          "#002D15",
+          "#034D2A",
+          "#08703F",
+          "#3C9461",
+          "#63BA84",
+          "#8AE1A9",
+          "#C6FFD8"
+        ]
+      },
+      "ok-bg": {
+        "role": "status",
+        "displayName": "Clearance Wash",
+        "canonical": "#E6F4EC",
+        "oklch": "oklch(95.5% 0.018 161.1)",
+        "tonalRamp": [
+          "#050E09",
+          "#1C2721",
+          "#38433D",
+          "#55615A",
+          "#77847D",
+          "#9BA8A1",
+          "#C1CEC7",
+          "#E5F2EB"
+        ]
+      },
+      "ok-line": {
+        "role": "status",
+        "displayName": "Clearance Rule",
+        "canonical": "#A9D9BE",
+        "oklch": "oklch(84.4% 0.063 160.1)",
+        "tonalRamp": [
+          "#001006",
+          "#002C1A",
+          "#1D4A34",
+          "#3C6951",
+          "#5F8C73",
+          "#82B197",
+          "#A8D8BD",
+          "#CBFCE0"
+        ]
+      },
+      "warn": {
+        "role": "status",
+        "displayName": "Signal Amber",
+        "canonical": "#A64B06",
+        "oklch": "oklch(52.1% 0.138 48.6)",
+        "tonalRamp": [
+          "#1B0400",
+          "#3E1700",
+          "#672C04",
+          "#93430A",
+          "#C0632A",
+          "#E98851",
+          "#FFB893",
+          "#FEEADF"
+        ]
+      },
+      "warn-bg": {
+        "role": "status",
+        "displayName": "Amber Wash",
+        "canonical": "#FDF1E4",
+        "oklch": "oklch(96.4% 0.022 69.8)",
+        "tonalRamp": [
+          "#110903",
+          "#2B2219",
+          "#473E34",
+          "#665C51",
+          "#897E73",
+          "#AEA396",
+          "#D4C8BC",
+          "#F8ECDF"
+        ]
+      },
+      "warn-line": {
+        "role": "status",
+        "displayName": "Amber Rule",
+        "canonical": "#F0C590",
+        "oklch": "oklch(84.9% 0.084 72.1)",
+        "tonalRamp": [
+          "#150800",
+          "#341F00",
+          "#593700",
+          "#7B5520",
+          "#9F7845",
+          "#C69C68",
+          "#EDC28D",
+          "#FFEBD4"
+        ]
+      },
+      "danger": {
+        "role": "status",
+        "displayName": "Signal Red",
+        "canonical": "#B42318",
+        "oklch": "oklch(50.0% 0.182 29.5)",
+        "tonalRamp": [
+          "#210000",
+          "#4C0000",
+          "#7C0502",
+          "#AD1A10",
+          "#D74839",
+          "#FE7361",
+          "#FDB6AB",
+          "#FFE9E5"
+        ]
+      },
+      "danger-bg": {
+        "role": "status",
+        "displayName": "Red Wash",
+        "canonical": "#FCEBE9",
+        "oklch": "oklch(95.3% 0.019 25.6)",
+        "tonalRamp": [
+          "#120807",
+          "#2D211F",
+          "#493C3B",
+          "#685A58",
+          "#8B7C7A",
+          "#B0A09F",
+          "#D7C6C4",
+          "#FBEAE8"
+        ]
+      },
+      "danger-line": {
+        "role": "status",
+        "displayName": "Red Rule",
+        "canonical": "#F1B3AC",
+        "oklch": "oklch(82.2% 0.073 26.1)",
+        "tonalRamp": [
+          "#200000",
+          "#411210",
+          "#612F2B",
+          "#824D48",
+          "#A86F69",
+          "#CF938D",
+          "#F7B9B2",
+          "#FEE9E6"
+        ]
+      },
+      "info": {
+        "role": "status",
+        "displayName": "Chart Blue",
+        "canonical": "#1D5FB8",
+        "oklch": "oklch(49.6% 0.155 257.6)",
+        "tonalRamp": [
+          "#000926",
+          "#002152",
+          "#013C84",
+          "#175AB3",
+          "#3E7FDB",
+          "#6AA5FB",
+          "#AACDFF",
+          "#E5EFFF"
+        ]
+      },
+      "info-bg": {
+        "role": "status",
+        "displayName": "Chart Blue Wash",
+        "canonical": "#EAF1FB",
+        "oklch": "oklch(95.6% 0.015 257.2)",
+        "tonalRamp": [
+          "#070B12",
+          "#1F242C",
+          "#3B4048",
+          "#585E66",
+          "#7A818A",
+          "#9FA5AE",
+          "#C4CBD5",
+          "#E8EFF9"
+        ]
+      },
+      "info-line": {
+        "role": "status",
+        "displayName": "Chart Blue Rule",
+        "canonical": "#B5CCEE",
+        "oklch": "oklch(83.9% 0.054 258.0)",
+        "tonalRamp": [
+          "#000A21",
+          "#13243E",
+          "#2E405C",
+          "#4B5F7C",
+          "#6C82A1",
+          "#90A6C7",
+          "#B5CCEE",
+          "#E5EFFF"
+        ]
+      },
+      "neutral": {
+        "role": "status",
+        "displayName": "Slate",
+        "canonical": "#4A5868",
+        "oklch": "oklch(45.5% 0.032 251.9)",
+        "tonalRamp": [
+          "#030C18",
+          "#192533",
+          "#344150",
+          "#515F6F",
+          "#738293",
+          "#97A6B8",
+          "#BCCCDF",
+          "#E3F0FF"
+        ]
+      },
+      "neutral-bg": {
+        "role": "status",
+        "displayName": "Slate Wash",
+        "canonical": "#EFF2F5",
+        "oklch": "oklch(96.0% 0.005 247.9)",
+        "tonalRamp": [
+          "#090B0D",
+          "#222426",
+          "#3E4042",
+          "#5B5E60",
+          "#7E8083",
+          "#A2A5A8",
+          "#C8CBCE",
+          "#ECEFF2"
+        ]
+      },
+      "neutral-line": {
+        "role": "status",
+        "displayName": "Slate Rule",
+        "canonical": "#CFD6DE",
+        "oklch": "oklch(87.3% 0.013 251.6)",
+        "tonalRamp": [
+          "#070C11",
+          "#1F252A",
+          "#3B4047",
+          "#585E65",
+          "#7B8188",
+          "#9FA5AD",
+          "#C4CBD3",
+          "#E8EFF7"
+        ]
+      },
+      "on-navy-warn": {
+        "role": "on-dark",
+        "displayName": "Night Amber",
+        "canonical": "#F8C77E",
+        "oklch": "oklch(85.7% 0.107 76.5)",
+        "tonalRamp": [
+          "#140800",
+          "#332000",
+          "#573900",
+          "#7C550B",
+          "#A4772B",
+          "#CA9B53",
+          "#F2C178",
+          "#FEECD1"
+        ]
+      },
+      "on-navy-danger": {
+        "role": "on-dark",
+        "displayName": "Night Red",
+        "canonical": "#FFA197",
+        "oklch": "oklch(80.1% 0.114 26.5)",
+        "tonalRamp": [
+          "#210000",
+          "#4C0003",
+          "#70201D",
+          "#93403A",
+          "#BA635B",
+          "#E3887E",
+          "#FFB5AC",
+          "#FFE9E6"
+        ]
+      },
+      "on-navy-ok": {
+        "role": "on-dark",
+        "displayName": "Night Green",
+        "canonical": "#86DDB8",
+        "oklch": "oklch(83.2% 0.100 165.1)",
+        "tonalRamp": [
+          "#001007",
+          "#002C1D",
+          "#004C35",
+          "#026F4F",
+          "#3A9371",
+          "#62B995",
+          "#89E0BA",
+          "#C0FFE2"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Dashboard hero greeting and login panel statement; never inside working screens."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page title (PageHeader h1) in Logbook Ink."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Dialog titles and in-page section headings."
+      },
+      "title-sm": {
+        "displayName": "Title Small",
+        "purpose": "Panel and dashboard-card headers; register values."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default body text and input values."
+      },
+      "body-sm": {
+        "displayName": "Body Small",
+        "purpose": "Workhorse size: table cells, descriptions, menus, sidebar links."
+      },
+      "label-lg": {
+        "displayName": "Label Large",
+        "purpose": "Medium buttons."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Field labels, small buttons, tabs."
+      },
+      "tag": {
+        "displayName": "Tag",
+        "purpose": "Status tags."
+      },
+      "column-head": {
+        "displayName": "Column Head",
+        "purpose": "Table column heads (muted ink)."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Hints, metadata, breadcrumb, timestamps."
+      },
+      "overline": {
+        "displayName": "Overline",
+        "purpose": "Uppercase 11px group labels: sidebar groups, Périmètre, hero eyebrow."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "Dashboard hero indicator values, tabular."
+      },
+      "ref": {
+        "displayName": "Reference",
+        "purpose": "Business references (IMO, PR/BC, voyage, certificate) in IBM Plex Mono via .ref."
+      }
+    },
+    "shadows": [
+      {
+        "name": "panel",
+        "value": "0 0 0 1px #DCE3E9",
+        "purpose": "Hairline ring on every resting surface (panels, filter bar, tiles, dashboard cards)."
+      },
+      {
+        "name": "panel-hover",
+        "value": "0 0 0 1px #C3CED8",
+        "purpose": "Strengthened ring on a hovered linked surface; no lift."
+      },
+      {
+        "name": "raised",
+        "value": "0 1px 2px rgba(16,43,68,0.06), 0 0 0 1px #DCE3E9",
+        "purpose": "Hairline with the faintest lift; rare."
+      },
+      {
+        "name": "pop",
+        "value": "0 12px 32px rgba(11,31,51,0.20), 0 0 0 1px rgba(11,31,51,0.06)",
+        "purpose": "Floating layers only: menus, dialogs, tooltips."
+      },
+      {
+        "name": "filter-active",
+        "value": "0 0 0 2px #176A79",
+        "purpose": "Active toggle filter tile."
+      },
+      {
+        "name": "row-selected",
+        "value": "inset 3px 0 0 #176A79",
+        "purpose": "Selected table row marker on the first cell."
+      },
+      {
+        "name": "input-focus",
+        "value": "0 0 0 2px #D3E9EC",
+        "purpose": "Ring around a focused input (its border turns Ledger Ocean)."
+      },
+      {
+        "name": "focus-outline",
+        "value": "outline: 2px solid #176A79; outline-offset: 2px; border-radius: 4px",
+        "purpose": "Global :focus-visible outline on every interactive element."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Tailwind default easing for colour and ring transitions."
+      },
+      {
+        "name": "duration-standard",
+        "value": "150ms",
+        "purpose": "Hover colour, ring and opacity transitions."
+      },
+      {
+        "name": "spin",
+        "value": "spin 1s linear infinite",
+        "purpose": "16px spinner inside a busy button only."
+      },
+      {
+        "name": "pulse",
+        "value": "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "purpose": "Loading skeleton blocks (navy-50)."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation-duration: 0.01ms; transition-duration: 0.01ms",
+        "purpose": "Applied globally under prefers-reduced-motion: reduce."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "xl",
+        "value": "1280px"
+      },
+      {
+        "name": "wide",
+        "value": "1440px"
+      },
+      {
+        "name": "2xl",
+        "value": "1536px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Ledger Ocean action; one per action group.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Soumettre à validation</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:6px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:22px;font-weight:500;border:0;cursor:pointer;transition:background-color 150ms cubic-bezier(0.4,0,0.2,1),border-color 150ms cubic-bezier(0.4,0,0.2,1);background:#176A79;color:#FFFFFF;} .ds-btn-primary:hover{background:#105562;} .ds-btn-primary:focus-visible{outline:2px solid #176A79;outline-offset:2px;} .ds-btn-primary:disabled{background:rgba(23,106,121,0.5);cursor:not-allowed;}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "White outline button; default for Annuler and secondary actions.",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">Annuler</button>",
+      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:6px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:22px;font-weight:500;border:0;cursor:pointer;transition:background-color 150ms cubic-bezier(0.4,0,0.2,1),border-color 150ms cubic-bezier(0.4,0,0.2,1);background:#FFFFFF;color:#1F2D3A;border:1px solid #C3CED8;} .ds-btn-secondary:hover{background:#F7F9FA;border-color:#DCE5EC;} .ds-btn-secondary:focus-visible{outline:2px solid #176A79;outline-offset:2px;}"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Signal Red; destructive confirmations only.",
+      "html": "<button class=\"ds-btn-danger\" type=\"button\">Rejeter la demande</button>",
+      "css": ".ds-btn-danger{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:6px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:22px;font-weight:500;border:0;cursor:pointer;transition:background-color 150ms cubic-bezier(0.4,0,0.2,1),border-color 150ms cubic-bezier(0.4,0,0.2,1);background:#B42318;color:#FFFFFF;} .ds-btn-danger:hover{background:#912018;} .ds-btn-danger:focus-visible{outline:2px solid #176A79;outline-offset:2px;}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Label above, 36px hairline input, ocean focus ring, hint or error below.",
+      "html": "<div class=\"ds-field\"><label class=\"ds-field-label\" for=\"ds-imo\">Numéro IMO<span class=\"ds-req\" aria-hidden=\"true\">*</span></label><input id=\"ds-imo\" class=\"ds-input\" placeholder=\"7 chiffres\" /><p class=\"ds-field-hint\">Sans le préfixe « IMO ».</p></div>",
+      "css": ".ds-field{font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;max-width:320px;} .ds-field-label{display:block;margin-bottom:4px;font-size:13px;line-height:20px;font-weight:500;color:#1F2D3A;} .ds-req{margin-left:2px;color:#B42318;} .ds-input{box-sizing:border-box;height:36px;width:100%;border:1px solid #C3CED8;border-radius:6px;background:#FFFFFF;padding:0 12px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:22px;color:#1F2D3A;transition:border-color 150ms cubic-bezier(0.4,0,0.2,1),box-shadow 150ms cubic-bezier(0.4,0,0.2,1);} .ds-input::placeholder{color:#687786;} .ds-input:hover{border-color:#2F5F7B;} .ds-input:focus{outline:none;border-color:#176A79;box-shadow:0 0 0 2px #D3E9EC;} .ds-input[aria-invalid='true']{border-color:#B42318;} .ds-input[aria-invalid='true']:focus{box-shadow:0 0 0 2px #FCEBE9;} .ds-field-hint{margin:4px 0 0;font-size:12px;line-height:16px;color:#556677;}"
+    },
+    {
+      "name": "Status Tags",
+      "kind": "chip",
+      "refersTo": "status-tag-ok",
+      "description": "4px-cornered stamps: label plus icon, never colour alone.",
+      "html": "<div class=\"ds-tags\"><span class=\"ds-tag ds-tag-ok\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m9 12 2 2 4-4\"/></svg><span>Approuvé</span></span><span class=\"ds-tag ds-tag-warn\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/></svg><span>En attente</span></span><span class=\"ds-tag ds-tag-danger\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m15 9-6 6\"/><path d=\"m9 9 6 6\"/></svg><span>Expiré</span></span><span class=\"ds-tag ds-tag-info\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 12c-2-2.67-4-4-6-4a4 4 0 1 0 0 8c2 0 4-1.33 6-4Zm0 0c2 2.67 4 4 6 4a4 4 0 0 0 0-8c-2 0-4 1.33-6 4Z\"/></svg><span>Validité illimitée</span></span><span class=\"ds-tag ds-tag-neutral\"><span>Brouillon</span></span></div>",
+      "css": ".ds-tags{display:flex;flex-wrap:wrap;gap:8px;} .ds-tag{display:inline-flex;align-items:center;gap:4px;max-width:100%;white-space:nowrap;border:1px solid;border-radius:4px;padding:1px 6px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12px;line-height:16px;font-weight:500;} .ds-tag-ok{background:#E6F4EC;color:#08703F;border-color:#A9D9BE;} .ds-tag-warn{background:#FDF1E4;color:#A64B06;border-color:#F0C590;} .ds-tag-danger{background:#FCEBE9;color:#B42318;border-color:#F1B3AC;} .ds-tag-info{background:#EAF1FB;color:#1D5FB8;border-color:#B5CCEE;} .ds-tag-neutral{background:#EFF2F5;color:#4A5868;border-color:#CFD6DE;}"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat white sheet with a hairline ring and an optional sunken header band.",
+      "html": "<section class=\"ds-panel\"><div class=\"ds-panel-head\"><h2>Identité du navire</h2><button class=\"ds-link\" type=\"button\">Modifier</button></div><dl class=\"ds-dl\"><div><dt>Numéro IMO</dt><dd><span class=\"ds-ref\">9876543</span></dd></div><div><dt>Pavillon</dt><dd>Tunisie</dd></div><div><dt>Type</dt><dd>Vraquier</dd></div><div><dt>Port en lourd</dt><dd class=\"ds-num\">32 400 t</dd></div></dl></section>",
+      "css": ".ds-panel{max-width:520px;border-radius:8px;background:#FFFFFF;box-shadow:0 0 0 1px #DCE3E9;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;color:#1F2D3A;} .ds-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:48px;box-sizing:border-box;padding:8px 16px;border-bottom:1px solid #DCE3E9;background:#F7F9FA;border-radius:8px 8px 0 0;} .ds-panel-head h2{margin:0;font-size:15px;line-height:24px;font-weight:600;color:#102B44;letter-spacing:-0.01em;} .ds-link{background:none;border:0;padding:0;font:500 13px/20px 'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;color:#176A79;cursor:pointer;} .ds-link:hover{text-decoration:underline;} .ds-link:focus-visible{outline:2px solid #176A79;outline-offset:2px;border-radius:4px;} .ds-dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px;margin:0;padding:16px;} .ds-dl dt{font-size:12px;line-height:16px;color:#556677;} .ds-dl dd{margin:2px 0 0;font-size:13px;line-height:20px;font-weight:500;} .ds-ref{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.93em;letter-spacing:-0.025em;font-variant-numeric:tabular-nums;} .ds-num{font-variant-numeric:tabular-nums;}"
+    },
+    {
+      "name": "Ruled Register Table",
+      "kind": "custom",
+      "refersTo": "table-head",
+      "description": "Signature data table: sunken sticky head, hairline-ruled rows, ocean hover, inset ocean bar on the selected row.",
+      "html": "<table class=\"ds-table\"><thead><tr><th>Référence</th><th>Navire</th><th>Statut</th><th class=\"ds-r\">Montant</th></tr></thead><tbody><tr><td><span class=\"ds-ref\">PR-2026-0142</span></td><td>Navire A</td><td><span class=\"ds-tag ds-tag-warn\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/></svg><span>En attente</span></span></td><td class=\"ds-r\">12 480,00 EUR</td></tr><tr data-selected=\"true\"><td><span class=\"ds-ref\">PR-2026-0139</span></td><td>Navire B</td><td><span class=\"ds-tag ds-tag-ok\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m9 12 2 2 4-4\"/></svg><span>Approuvée</span></span></td><td class=\"ds-r\">3 215,50 EUR</td></tr><tr><td><span class=\"ds-ref\">PR-2026-0131</span></td><td>Navire A</td><td><span class=\"ds-tag ds-tag-neutral\"><span>Brouillon</span></span></td><td class=\"ds-r\">860,00 EUR</td></tr></tbody></table>",
+      "css": ".ds-table{width:100%;max-width:640px;border-collapse:separate;border-spacing:0;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px;line-height:20px;color:#1F2D3A;background:#FFFFFF;box-shadow:0 0 0 1px #DCE3E9;border-radius:8px;overflow:hidden;} .ds-table th{position:sticky;top:0;background:#F7F9FA;border-bottom:1px solid #C3CED8;padding:8px 12px;text-align:left;font-size:12px;line-height:16px;font-weight:600;color:#556677;} .ds-table td{border-bottom:1px solid #DCE3E9;padding:10px 12px;vertical-align:middle;} .ds-table tbody tr:last-child td{border-bottom:0;} .ds-table tbody tr{cursor:pointer;} .ds-table tbody tr:hover td{background:rgba(236,245,246,0.7);} .ds-table tbody tr[data-selected='true'] td{background:#ECF5F6;} .ds-table tbody tr[data-selected='true'] td:first-child{box-shadow:inset 3px 0 0 #176A79;} .ds-table .ds-r{text-align:right;font-variant-numeric:tabular-nums;} .ds-ref{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.93em;letter-spacing:-0.025em;font-variant-numeric:tabular-nums;} .ds-tag{display:inline-flex;align-items:center;gap:4px;max-width:100%;white-space:nowrap;border:1px solid;border-radius:4px;padding:1px 6px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:12px;line-height:16px;font-weight:500;} .ds-tag-ok{background:#E6F4EC;color:#08703F;border-color:#A9D9BE;} .ds-tag-warn{background:#FDF1E4;color:#A64B06;border-color:#F0C590;} .ds-tag-danger{background:#FCEBE9;color:#B42318;border-color:#F1B3AC;} .ds-tag-info{background:#EAF1FB;color:#1D5FB8;border-color:#B5CCEE;} .ds-tag-neutral{background:#EFF2F5;color:#4A5868;border-color:#CFD6DE;}"
+    },
+    {
+      "name": "Register",
+      "kind": "custom",
+      "refersTo": "register-row",
+      "description": "Signature tally sheet: ruled label/value rows, tabular right-aligned values toned by severity, grey when zero.",
+      "html": "<div class=\"ds-register\"><h3>Achats en attente</h3><ul><li><a href=\"#\"><span class=\"ds-reg-label\">PR à valider</span><span class=\"ds-reg-val ds-warn\">7</span><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" class=\"ds-chev\"><path d=\"m9 18 6-6-6-6\"/></svg></a></li><li><a href=\"#\"><span class=\"ds-reg-label\">Livraisons incomplètes<small>Reliquats ouverts</small></span><span class=\"ds-reg-val ds-danger\">3</span><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" class=\"ds-chev\"><path d=\"m9 18 6-6-6-6\"/></svg></a></li><li><a href=\"#\"><span class=\"ds-reg-label\">Factures en litige</span><span class=\"ds-reg-val ds-zero\">0</span><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" class=\"ds-chev\"><path d=\"m9 18 6-6-6-6\"/></svg></a></li></ul></div>",
+      "css": ".ds-register{max-width:360px;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;} .ds-register h3{margin:0 0 4px;font-size:12px;line-height:16px;font-weight:600;color:#556677;} .ds-register ul{list-style:none;margin:0;padding:0;border-top:1px solid #DCE3E9;border-bottom:1px solid #DCE3E9;} .ds-register li+li{border-top:1px solid #DCE3E9;} .ds-register a{display:flex;align-items:center;gap:12px;margin:0 -8px;padding:8px;border-radius:4px;text-decoration:none;color:#1F2D3A;transition:background-color 150ms cubic-bezier(0.4,0,0.2,1);} .ds-register a:hover{background:#ECF5F6;} .ds-register a:focus-visible{outline:2px solid #176A79;outline-offset:2px;} .ds-reg-label{flex:1;min-width:0;font-size:13px;line-height:20px;} .ds-reg-label small{display:block;font-size:12px;line-height:16px;color:#556677;} .ds-reg-val{flex-shrink:0;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;} .ds-warn{color:#A64B06;} .ds-danger{color:#B42318;} .ds-zero{color:#687786;} .ds-chev{flex-shrink:0;color:#687786;} .ds-register a:hover .ds-chev{color:#176A79;}"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "refersTo": "sidebar",
+      "description": "Night Watch Navy rail: monogram, uppercase group overlines, active link with a teal bar and teal icon.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Navigation principale\"><div class=\"ds-nav-brand\"><svg viewBox=\"0 0 40 40\" width=\"36\" height=\"36\" role=\"img\" aria-label=\"AMC\"><rect x=\"0.5\" y=\"0.5\" width=\"39\" height=\"39\" rx=\"6\" fill=\"#102B44\" stroke=\"rgba(255,255,255,0.18)\"/><text x=\"20\" y=\"23\" text-anchor=\"middle\" font-family=\"IBM Plex Sans, system-ui, sans-serif\" font-weight=\"650\" font-size=\"13\" letter-spacing=\"0.6\" fill=\"#FFFFFF\">AMC</text><rect x=\"8\" y=\"29\" width=\"24\" height=\"2.5\" rx=\"1.25\" fill=\"#1B9AAA\"/></svg><div><p class=\"ds-nav-name\">Africa Marine Company</p><p class=\"ds-nav-sub\">Exploitation de flotte</p></div></div><p class=\"ds-nav-group\">Pilotage</p><a class=\"ds-nav-item\" href=\"#\" aria-current=\"page\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect width=\"7\" height=\"9\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"9\" x=\"14\" y=\"12\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"3\" y=\"16\" rx=\"1\"/></svg>Tableau de bord</a><p class=\"ds-nav-group\">Flotte &amp; équipages</p><a class=\"ds-nav-item\" href=\"#\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1 .6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1\"/><path d=\"M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.34 2.81 7.76\"/><path d=\"M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6\"/><path d=\"M12 10v4\"/><path d=\"M12 2v3\"/></svg>Navires</a><p class=\"ds-nav-group\">Conformité</p><a class=\"ds-nav-item\" href=\"#\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4\"/><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"/><path d=\"m3 15 2 2 4-4\"/></svg>Certificats</a></nav>",
+      "css": ".ds-nav{width:248px;box-sizing:border-box;padding:0 12px 16px;background:#0B1F33;color:#FFFFFF;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;} .ds-nav-brand{display:flex;align-items:center;gap:12px;height:56px;margin:0 -12px;padding:0 16px;border-bottom:1px solid rgba(255,255,255,0.08);} .ds-nav-name{margin:0;font-size:13px;line-height:18px;font-weight:600;} .ds-nav-sub{margin:0;font-size:11px;line-height:14px;font-weight:500;color:rgba(255,255,255,0.55);} .ds-nav-group{margin:16px 0 0;padding:0 8px 4px;font-size:11px;line-height:14px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:rgba(255,255,255,0.4);} .ds-nav-item{position:relative;display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:4px;font-size:13.5px;line-height:20px;color:rgba(255,255,255,0.7);text-decoration:none;transition:background-color 150ms cubic-bezier(0.4,0,0.2,1),color 150ms cubic-bezier(0.4,0,0.2,1);} .ds-nav-item svg{flex-shrink:0;color:rgba(255,255,255,0.5);} .ds-nav-item:hover{background:rgba(255,255,255,0.05);color:#FFFFFF;} .ds-nav-item:focus-visible{outline:2px solid #FFFFFF;outline-offset:2px;} .ds-nav-item[aria-current='page']{background:rgba(255,255,255,0.09);color:#FFFFFF;font-weight:500;} .ds-nav-item[aria-current='page'] svg{color:#1B9AAA;} .ds-nav-item[aria-current='page']::before{content:'';position:absolute;left:-12px;top:4px;bottom:4px;width:3px;border-radius:0 4px 4px 0;background:#1B9AAA;}"
+    },
+    {
+      "name": "Tabs",
+      "kind": "nav",
+      "refersTo": "tab",
+      "description": "Hairline-ruled tab strip; the active tab gets a 2px ocean underline, navy text and an ocean count chip.",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab\" role=\"tab\" aria-selected=\"true\">Aperçu</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">Certificats <span class=\"ds-count\">12</span></button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">Équipage <span class=\"ds-count\">24</span></button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">Historique</button></div>",
+      "css": ".ds-tabs{display:flex;gap:4px;border-bottom:1px solid #DCE3E9;font-family:'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;} .ds-tab{position:relative;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;padding:8px 12px;border:0;border-bottom:2px solid transparent;background:none;font:500 13px/20px 'IBM Plex Sans Variable','IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;color:#556677;cursor:pointer;transition:color 150ms cubic-bezier(0.4,0,0.2,1);} .ds-tab:hover{color:#1F2D3A;} .ds-tab:focus-visible{outline:2px solid #176A79;outline-offset:2px;border-radius:4px;} .ds-tab[aria-selected='true']{border-bottom-color:#176A79;color:#102B44;} .ds-count{border-radius:4px;background:#EDF2F6;padding:0 4px;font-size:11px;line-height:14px;font-weight:600;color:#556677;font-variant-numeric:tabular-nums;} .ds-tab[aria-selected='true'] .ds-count{background:#D3E9EC;color:#105562;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Logbook",
+    "overview": "AMC reads like a well-kept ship's logbook: every page ruled, every entry dated, every reference copied exactly, nothing written for effect. It is an operations tool used ashore and on board by masters, chief engineers, superintendents, the CSO and purchasing staff. The interface exists so that a reader can answer, at a glance, *which vessel, which document, which deadline, who acts next*. Its tone is factual, ruled and unhurried. Older code comments call the direction « Passerelle » (the bridge); the vocabulary is compatible. The bridge is where the logbook is kept, which is why the top bar carries a UTC and ship's-time watch clock and the dashboard opens on a view from the bridge at dusk.\n\nDensity is deliberate. Tables run compact (13px text, 10px row padding) because comparison across rows is the work. Forms and dialogs breathe more because entry errors are costly. Surfaces are flat white sheets on a pale canvas, outlined by a 1px hairline rather than lifted by shadow. Structure comes from rules: the ruled bottom border under every page header, ruled table rows, the 2px left rule of an instrument reading, the 3px top rule of a dialog. Business references (IMO numbers, PR/BC numbers, voyages, certificates) are set in IBM Plex Mono as they appear on ship's papers. The UI is entirely in French and keeps the trade acronyms (PR, RFQ, BC, BL, CSO, IMO, Charter Party, Noon Report).\n\nDecoration is rationed to one motif per context. The authentication screen carries a faint chart graticule. The dashboard hero carries the dusk sea scene. Every other screen is plain paper. Motion is functional only: colour transitions on hover, a spinner inside a busy button, a pulse on loading skeletons. Nothing enters with an animation, and `prefers-reduced-motion` collapses all transitions to zero. The system explicitly rejects generic SaaS dashboards: mosaics of identical rounded cards, grey drop shadows under every block, empty gradients, repeated anchor icons, a marketing hero inside the tool, colour-only statuses.",
+    "keyCharacteristics": [
+      "Flat, hairline-ruled white surfaces on a cool canvas (#F3F6F8); shadows only on floating layers.",
+      "One action colour (Ledger Ocean) for everything you can press or follow.",
+      "Every status is a text label plus icon, colour only reinforces it.",
+      "References in IBM Plex Mono; all figures tabular and right-aligned in columns.",
+      "Tight corners: 4px tags, 6px controls, 8px panels. No pills.",
+      "Navy chrome (sidebar, dashboard hero, dialog top rule) frames white working paper.",
+      "One decorative motif per context: graticule at login, dusk scene on the dashboard, none elsewhere."
+    ],
+    "rules": [
+      {
+        "name": "The Labelled Status Rule",
+        "body": "Colour never carries meaning alone. Every status is a word plus an icon (check, triangle, cross, clock, infinity, question mark); colour only reinforces it. A zero value in a register stays neutral grey, never green.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ocean Means Act Rule",
+        "body": "Ledger Ocean is reserved for what can be pressed, followed or is currently selected. It never colours a heading, an illustration or a passive value.",
+        "section": "colors"
+      },
+      {
+        "name": "The Waterline Rule",
+        "body": "Waterline Teal appears only as a thin mark (2.5–3px rules, active icons on navy). It is never a fill, never a button, and never text on a light surface (3.4:1 on white fails).",
+        "section": "colors"
+      },
+      {
+        "name": "The Ledger Figures Rule",
+        "body": "Every count, amount, quantity, date and time uses tabular figures (`.tabular`), and numeric columns align right. Amounts carry their ISO currency; quantities carry their unit.",
+        "section": "typography"
+      },
+      {
+        "name": "The Reference Rule",
+        "body": "Plex Mono is for references only (IMO, PR/RFQ/BC/BL numbers, voyage codes, certificate numbers, request IDs). Labels, headings and prose are never set in mono.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence Case Rule",
+        "body": "Headings, buttons, tabs and labels are in sentence case. Uppercase is limited to 11–12px semibold overlines with 0.06–0.1em tracking.",
+        "section": "typography"
+      },
+      {
+        "name": "The Ruled Page Rule",
+        "body": "Surfaces at rest are flat sheets outlined by a hairline. A drop shadow means \"this floats above the page\"; it is never used to make a resting card look important. Hover on a linked surface strengthens the ring (`#C3CED8`), and an active filter tile takes a 2px ocean ring. Neither lifts the surface.",
+        "section": "elevation"
+      },
+      {
+        "name": "The No-Pill Rule",
+        "body": "Status tags are 4px-cornered rectangles with a 1px tinted border, like a stamp in a register, never rounded pills.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "**Do** build every new screen from `PageHeader`, `FilterBar`, `Panel`, `DataTable`, `Register`, `Badge`/`StatusBadge` and `Dialog`/`ConfirmDialog` before writing new markup.",
+      "**Do** use the Tailwind tokens (`navy`, `action`, `teal`, `ink-*`, `line-*`, status triplets) and the `.panel`, `.gauge`, `.ref`, `.tabular`, `.input`, `.table-amc` classes; they are the source of truth.",
+      "**Do** pair every status colour with a French label and an icon, and keep the next action stated in words.",
+      "**Do** set business references in `.ref` (Plex Mono 0.93em) and every figure in tabular numerals, right-aligned in columns, with units and ISO currency.",
+      "**Do** keep resting surfaces flat with the hairline ring (`0 0 0 1px #DCE3E9`); reserve `shadow-pop` for menus, dialogs and tooltips.",
+      "**Do** use `ink-muted` for any secondary text on canvas or sunken paper; `ink-soft` passes AA only on white.",
+      "**Do** give a wide table a horizontal scroll and the explicit scroll hint on mobile instead of silently dropping essential columns.",
+      "**Do** keep the global focus outline (2px Ledger Ocean, 2px offset) visible on every interactive element."
+    ],
+    "donts": [
+      "**Don't** build mosaics of identical rounded cards or put a drop shadow under every block.",
+      "**Don't** add gradients, wave motifs, repeated anchor icons or illustrations outside the two sanctioned contexts (the login graticule and the dashboard hero).",
+      "**Don't** reuse the dusk scene, its gradients or its on-navy tints on any screen other than the dashboard; vessel, voyage and module headers stay plain `PageHeader`s.",
+      "**Don't** use Ledger Ocean for headings, decoration or passive values, or Waterline Teal as a fill, a button or text on a light surface.",
+      "**Don't** round status tags into pills or use full rounding on anything that is not naturally round.",
+      "**Don't** set labels, headings or prose in Plex Mono, or use spaced uppercase beyond 11–12px overlines.",
+      "**Don't** hard-code hex values in components; only the dashboard hero and the AMC monogram may use literal colours.",
+      "**Don't** add entrance animations or decorative motion; transitions are limited to colour, rings and opacity, and must collapse under `prefers-reduced-motion`.",
+      "**Don't** add a new KPI tile row for a numeric summary; use the Register."
+    ]
+  }
+}

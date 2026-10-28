@@ -1,0 +1,82 @@
+# CI AMC (CDC §13.2) : lint/typecheck, tests, vérification des migrations Prisma, audit
+# des dépendances, génération OpenAPI, build API + Web.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: amc
+          POSTGRES_PASSWORD: amc_ci_password
+          POSTGRES_DB: amc
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U amc" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://amc:amc_ci_password@localhost:5432/amc?schema=public
+      SHADOW_DATABASE_URL: postgresql://amc:amc_ci_password@localhost:5432/amc_shadow?schema=public
+      S3_ENDPOINT: http://localhost:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY: ci
+      S3_SECRET_KEY: ci-secret
+      WORKERS_ENABLED: 'false'
+      EMAIL_MODE: disabled
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Extensions + base shadow
+        run: |
+          PGPASSWORD=amc_ci_password psql -h localhost -U amc -d amc -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS unaccent;"
+          PGPASSWORD=amc_ci_password psql -h localhost -U amc -d amc -c "CREATE DATABASE amc_shadow;"
+      - run: npm run build -w @amc/types
+      - name: Prisma — validation, client, migrations
+        working-directory: apps/api
+        run: |
+          npx prisma validate
+          npx prisma generate
+          npx prisma migrate deploy
+      - name: Contrôle de dérive schéma ↔ migrations
+        working-directory: apps/api
+        run: |
+          npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" --script > drift.sql
+          # Bruit connu : extensions et DEFAULT de la colonne FTS générée (voir docs/ARCHITECTURE.md §2)
+          if grep -vE '^(--|$)|CREATE EXTENSION|search_tsv" DROP DEFAULT' drift.sql; then
+            echo "::error::Le schéma Prisma diverge des migrations" && exit 1
+          fi
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests unitaires API
+        working-directory: apps/api
+        run: npx jest --runInBand
+      - name: Seed (fixtures synthétiques)
+        working-directory: apps/api
+        run: npx ts-node --transpile-only prisma/seed.ts
+      - name: OpenAPI
+        working-directory: apps/api
+        run: npm run openapi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: apps/api/openapi.json
+      - name: Build
+        run: npm run build -w @amc/api && npm run build -w @amc/web
+      - name: Audit des dépendances (production)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true

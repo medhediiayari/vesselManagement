@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-canvas text-ink font-sans text-base antialiased;
+  }
+  /* Focus visible systématique (WCAG 2.2 AA — 2.4.7 / 2.4.11) */
+  :focus-visible {
+    outline: 2px solid #176a79;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply text-navy;
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer components {
+  /* Grilles : piste par défaut minmax(0,1fr) — un texte tronqué (nowrap) ou un tableau large ne peut plus
+     élargir la page sur mobile. Les utilitaires grid-cols-* (couche utilities) restent prioritaires. */
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Surface de lecture : plate, filet net (pas d'ombre portée sous chaque bloc) */
+  .panel {
+    @apply rounded-lg bg-white shadow-panel;
+  }
+  /* Lecture d'instrument : valeur repérée par un filet vertical, sans carte ni ombre (pas de mosaïque de tuiles) */
+  .gauge {
+    @apply border-l-2 border-line-strong py-0.5 pl-3;
+  }
+  a.gauge,
+  button.gauge {
+    @apply transition-colors hover:border-action hover:bg-action-50/60;
+  }
+  /* Référence métier (IMO, n° PR/BC, voyage, certificat) : chasse fixe comme sur les documents de bord */
+  .ref {
+    @apply font-mono text-[0.93em] tracking-tight;
+    font-variant-numeric: tabular-nums;
+  }
+  .field-label {
+    @apply mb-1 block text-sm font-medium text-ink;
+  }
+  .field-hint {
+    @apply mt-1 text-xs text-ink-muted;
+  }
+  .field-error {
+    @apply mt-1 text-xs font-medium text-danger;
+  }
+  .input {
+    @apply h-9 w-full rounded-md border border-line-strong bg-white px-3 text-base text-ink placeholder:text-ink-soft
+      disabled:cursor-not-allowed disabled:bg-neutral-bg focus:border-action focus:outline-none focus:ring-2 focus:ring-action-100;
+  }
+  .input[aria-invalid='true'] {
+    @apply border-danger focus:ring-danger-bg;
+  }
+  textarea.input {
+    @apply h-auto min-h-[84px] py-2;
+  }
+  /* Tableaux d'exploitation : en-tête façon registre, lignes réglées, sélection marquée d'un filet ocean */
+  .table-amc {
+    @apply w-full border-separate border-spacing-0 text-sm;
+  }
+  .table-amc thead th {
+    @apply sticky top-0 z-[1] border-b border-line-strong bg-surface-sunken px-3 py-2 text-left text-xs font-semibold text-ink-muted;
+  }
+  .table-amc tbody td {
+    @apply border-b border-line px-3 py-2.5 align-middle;
+  }
+  .table-amc tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .table-amc tbody tr:hover td {
+    @apply bg-action-50/70;
+  }
+  .table-amc tbody tr[data-selected='true'] td {
+    @apply bg-action-50;
+  }
+  .table-amc tbody tr[data-selected='true'] td:first-child {
+    box-shadow: inset 3px 0 0 #176a79;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

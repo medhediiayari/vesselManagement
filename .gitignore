@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+!.env.example
+*.log
+.DS_Store
+.turbo/
+apps/api/tmp/
+apps/api/openapi.json
+.playwright-mcp/
+.claude/

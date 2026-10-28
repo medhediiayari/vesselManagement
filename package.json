@@ -1,0 +1,30 @@
+{
+  "name": "amc-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plateforme maritime AMC (Africa Marine Company) — monorepo API NestJS + Web Next.js + PostgreSQL + MinIO",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "infra:up": "docker compose -f infra/docker-compose.yml --env-file .env up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml --env-file .env down",
+    "infra:av": "docker compose -f infra/docker-compose.yml --env-file .env --profile antivirus up -d",
+    "app:up": "docker compose -f infra/docker-compose.yml --env-file .env --profile app up -d --build",
+    "app:down": "docker compose -f infra/docker-compose.yml --env-file .env --profile app down",
+    "build:types": "npm run build -w @amc/types",
+    "db:generate": "npm run prisma:generate -w @amc/api",
+    "db:migrate": "npm run prisma:deploy -w @amc/api",
+    "db:seed": "npm run seed -w @amc/api",
+    "db:reset": "npm run db:reset -w @amc/api",
+    "dev:api": "npm run start:dev -w @amc/api",
+    "dev:web": "npm run dev -w @amc/web",
+    "build": "npm run build -w @amc/types && npm run build -w @amc/api && npm run build -w @amc/web",
+    "typecheck": "npm run typecheck -w @amc/types && npm run typecheck -w @amc/api && npm run typecheck -w @amc/web",
+    "test": "npm run test -w @amc/api"
+  }
+}

@@ -1,0 +1,2877 @@
+// =============================================================================
+// AMC — Plateforme maritime : modèle relationnel PostgreSQL (CDC §10 / §13)
+// Conventions :
+//  - PK UUID ; created_at / updated_at en UTC (timestamptz) ; tables snake_case
+//  - Montants DECIMAL(18,2) / prix DECIMAL(18,4) ; quantités DECIMAL(18,3) + unité
+//  - Les blobs (PDF, Excel, images) ne sont JAMAIS stockés en base : table `files`
+//    -> objet immuable dans MinIO (bucket privé) + SHA-256 + statut antivirus
+//  - Invariants non exprimables en Prisma (index partiels, triggers append-only,
+//    colonnes FTS générées, CHECK) : migration SQL `0002_db_hardening`
+// =============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  // native (poste de dev) + Debian/OpenSSL 3 (images Docker node:20-bookworm-slim)
+  binaryTargets   = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+  extensions        = [pg_trgm, unaccent]
+}
+
+// =============================================================================
+// PLATFORM — sociétés, paramètres, fichiers, audit, notifications, jobs
+// =============================================================================
+
+model Company {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique @db.VarChar(32)
+  name      String   @db.VarChar(200)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  users     User[]
+  vessels   Vessel[]
+  members   Member[]
+  suppliers Supplier[]
+
+  @@map("companies")
+}
+
+/// Paramètres modifiables par le Super Admin (timeout d'inactivité, champs self-edit, limites…)
+model SystemSetting {
+  key         String   @id @db.VarChar(100)
+  value       Json
+  description String?
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("system_settings")
+}
+
+/// Séquences de numérotation métier (PR, BC, RFQ, références CSO…), verrouillées en transaction.
+model NumberSequence {
+  key       String   @id @db.VarChar(120)
+  nextValue Int      @default(1) @map("next_value")
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("number_sequences")
+}
+
+enum FileKind {
+  PDF
+  EXCEL
+  IMAGE
+  ZIP
+  CSV
+  WORD
+  OTHER
+}
+
+enum FileScanStatus {
+  PENDING
+  CLEAN
+  INFECTED
+  /// Antivirus désactivé : statut explicite, jamais confondu avec CLEAN
+  SKIPPED
+  ERROR
+}
+
+enum FileContext {
+  CERTIFICATE
+  CSO_DOCUMENT
+  VESSEL_PHOTO
+  VESSEL_ATTACHMENT
+  MEMBER_PHOTO
+  MEMBER_DOCUMENT
+  PURCHASING
+  VOYAGE
+  CHARTER_PARTY
+  NOON_REPORT
+  IMPORT_SOURCE
+  EXPORT
+  GENERATED
+}
+
+/// Blob immuable stocké dans MinIO. Un document logique (certificat, version CSO, BL…)
+/// référence un `files.id`. Le lien propriétaire (owner_type/owner_id) est posé une seule fois
+/// et sert à résoudre les droits lors d'un preview/download (aucune clé objet exposée).
+model StoredFile {
+  id             String         @id @default(uuid()) @db.Uuid
+  bucket         String         @db.VarChar(63)
+  objectKey      String         @map("object_key") @db.VarChar(512)
+  originalName   String         @map("original_name") @db.VarChar(255)
+  extension      String         @db.VarChar(16)
+  mimeType       String         @map("mime_type") @db.VarChar(127)
+  kind           FileKind
+  sizeBytes      BigInt         @map("size_bytes")
+  sha256         String         @db.Char(64)
+  scanStatus     FileScanStatus @default(PENDING) @map("scan_status")
+  scanDetail     String?        @map("scan_detail") @db.VarChar(500)
+  scannedAt      DateTime?      @map("scanned_at") @db.Timestamptz(3)
+  context        FileContext
+  /// Navire de rattachement (scope) lorsque connu dès le dépôt
+  vesselId       String?        @map("vessel_id") @db.Uuid
+  ownerType      String?        @map("owner_type") @db.VarChar(64)
+  ownerId        String?        @map("owner_id") @db.Uuid
+  attachedAt     DateTime?      @map("attached_at") @db.Timestamptz(3)
+  /// Métadonnées techniques (images : dimensions ; PDF : nombre de pages)
+  width          Int?
+  height         Int?
+  pageCount      Int?           @map("page_count")
+  thumbnailKey   String?        @map("thumbnail_key") @db.VarChar(512)
+  uploadedById   String?        @map("uploaded_by_id") @db.Uuid
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  retentionUntil DateTime?      @map("retention_until") @db.Timestamptz(3)
+  deletedAt      DateTime?      @map("deleted_at") @db.Timestamptz(3)
+
+  uploadedBy User?   @relation("FileUploader", fields: [uploadedById], references: [id])
+  vessel     Vessel? @relation(fields: [vesselId], references: [id])
+
+  @@index([sha256])
+  @@index([ownerType, ownerId])
+  @@index([scanStatus])
+  @@index([uploadedById, createdAt])
+  @@map("files")
+}
+
+enum AuditResult {
+  SUCCESS
+  DENIED
+  FAILURE
+}
+
+/// Journal d'audit append-only (trigger anti UPDATE/DELETE en migration SQL).
+/// Volontairement sans clé étrangère : indépendant du cycle de vie métier.
+model AuditEvent {
+  id         String      @id @default(uuid()) @db.Uuid
+  occurredAt DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  actorId    String?     @map("actor_id") @db.Uuid
+  actorLabel String?     @map("actor_label") @db.VarChar(200)
+  action     String      @db.VarChar(100)
+  module     String      @db.VarChar(40)
+  entityType String      @map("entity_type") @db.VarChar(60)
+  entityId   String?     @map("entity_id") @db.VarChar(64)
+  vesselId   String?     @map("vessel_id") @db.Uuid
+  result     AuditResult @default(SUCCESS)
+  before     Json?
+  after      Json?
+  metadata   Json?
+  ip         String?     @db.VarChar(64)
+  userAgent  String?     @map("user_agent") @db.VarChar(400)
+  sessionId  String?     @map("session_id") @db.Uuid
+  requestId  String?     @map("request_id") @db.VarChar(64)
+
+  @@index([module, occurredAt(sort: Desc)])
+  @@index([entityType, entityId])
+  @@index([vesselId, occurredAt(sort: Desc)])
+  @@index([actorId, occurredAt(sort: Desc)])
+  @@map("audit_events")
+}
+
+/// Clés d'idempotence pour mutations critiques (réceptions, approbations, envois)
+model IdempotencyKey {
+  userId         String   @map("user_id") @db.Uuid
+  key            String   @db.VarChar(128)
+  route          String   @db.VarChar(200)
+  requestHash    String   @map("request_hash") @db.Char(64)
+  responseStatus Int?     @map("response_status")
+  responseBody   Json?    @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@id([userId, key])
+  @@map("idempotency_keys")
+}
+
+enum NotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+model Notification {
+  id          String               @id @default(uuid()) @db.Uuid
+  userId      String               @map("user_id") @db.Uuid
+  type        String               @db.VarChar(80)
+  title       String               @db.VarChar(250)
+  body        String?
+  priority    NotificationPriority @default(NORMAL)
+  module      String               @db.VarChar(40)
+  entityType  String?              @map("entity_type") @db.VarChar(60)
+  entityId    String?              @map("entity_id") @db.Uuid
+  vesselId    String?              @map("vessel_id") @db.Uuid
+  link        String?              @db.VarChar(500)
+  /// Alerte obligatoire : ne disparaît pas sur simple lecture
+  isMandatory Boolean              @default(false) @map("is_mandatory")
+  dedupeKey   String?              @map("dedupe_key") @db.VarChar(200)
+  readAt      DateTime?            @map("read_at") @db.Timestamptz(3)
+  resolvedAt  DateTime?            @map("resolved_at") @db.Timestamptz(3)
+  createdAt   DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user       User            @relation(fields: [userId], references: [id])
+  deliveries EmailDelivery[]
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+  SUPPRESSED
+}
+
+model EmailDelivery {
+  id                String      @id @default(uuid()) @db.Uuid
+  notificationId    String?     @map("notification_id") @db.Uuid
+  toAddress         String      @map("to_address") @db.VarChar(320)
+  subject           String      @db.VarChar(300)
+  bodyText          String      @map("body_text")
+  bodyHtml          String?     @map("body_html")
+  status            EmailStatus @default(QUEUED)
+  attempts          Int         @default(0)
+  lastError         String?     @map("last_error") @db.VarChar(1000)
+  providerMessageId String?     @map("provider_message_id") @db.VarChar(300)
+  sentAt            DateTime?   @map("sent_at") @db.Timestamptz(3)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  notification Notification?        @relation(fields: [notificationId], references: [id])
+  events       EmailDeliveryEvent[]
+
+  @@index([status, createdAt])
+  @@map("email_deliveries")
+}
+
+model EmailDeliveryEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  deliveryId String   @map("delivery_id") @db.Uuid
+  event      String   @db.VarChar(40)
+  detail     String?  @db.VarChar(1000)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  delivery EmailDelivery @relation(fields: [deliveryId], references: [id])
+
+  @@index([deliveryId])
+  @@map("email_delivery_events")
+}
+
+/// Règles de notification génériques (événements hors certificats)
+model NotificationRule {
+  id         String   @id @default(uuid()) @db.Uuid
+  eventType  String   @map("event_type") @db.VarChar(80)
+  name       String   @db.VarChar(200)
+  /// [{type: 'USER'|'ROLE'|'DEPARTMENT', id}]
+  recipients Json
+  channels   String[] @default(["APP", "EMAIL"])
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([eventType, isActive])
+  @@map("notification_rules")
+}
+
+/// Transactional outbox : écrit dans la même transaction que le changement d'état
+model OutboxEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  eventType     String    @map("event_type") @db.VarChar(80)
+  aggregateType String    @map("aggregate_type") @db.VarChar(60)
+  aggregateId   String    @map("aggregate_id") @db.Uuid
+  payload       Json
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  processedAt   DateTime? @map("processed_at") @db.Timestamptz(3)
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error") @db.VarChar(1000)
+
+  @@index([processedAt, createdAt])
+  @@map("outbox_events")
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  PARTIALLY_FAILED
+  FAILED
+  CANCELLED
+}
+
+model JobRun {
+  id         String    @id @default(uuid()) @db.Uuid
+  jobName    String    @map("job_name") @db.VarChar(80)
+  status     JobStatus
+  startedAt  DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(3)
+  detail     Json?
+
+  @@index([jobName, startedAt(sort: Desc)])
+  @@map("job_runs")
+}
+
+enum ExportFormat {
+  CSV
+  XLSX
+  PDF
+  ZIP
+}
+
+model ExportJob {
+  id            String       @id @default(uuid()) @db.Uuid
+  format        ExportFormat
+  module        String       @db.VarChar(40)
+  resource      String       @db.VarChar(60)
+  params        Json
+  status        JobStatus    @default(QUEUED)
+  fileId        String?      @map("file_id") @db.Uuid
+  itemCount     Int?         @map("item_count")
+  /// Éléments exclus faute de droits (jamais détaillés au demandeur)
+  excludedCount Int?         @map("excluded_count")
+  error         String?      @db.VarChar(1000)
+  requestedById String       @map("requested_by_id") @db.Uuid
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  finishedAt    DateTime?    @map("finished_at") @db.Timestamptz(3)
+
+  requestedBy User @relation(fields: [requestedById], references: [id])
+
+  @@index([requestedById, createdAt(sort: Desc)])
+  @@map("export_jobs")
+}
+
+enum ImportJobKind {
+  MEMBERS
+  CSO_DOCUMENTS
+}
+
+enum ImportPhase {
+  UPLOADED
+  MAPPING
+  PREVIEW_READY
+  COMMITTING
+  COMMITTED
+}
+
+enum ImportRowStatus {
+  PENDING
+  VALID
+  INVALID
+  DUPLICATE_SUSPECTED
+  APPLIED
+  SKIPPED
+  FAILED
+}
+
+enum ImportRowDecision {
+  PENDING
+  CREATE
+  UPDATE
+  IGNORE
+  CORRECT
+  CREATE_INDEPENDENT
+  SUBMIT_NEW_VERSION
+}
+
+/// Import en masse (Excel Members, ZIP/Excel CSO) : mapping -> prévisualisation -> décisions -> commit
+model ImportJob {
+  id           String      @id @default(uuid()) @db.Uuid
+  kind         ImportJobKind
+  status       JobStatus   @default(QUEUED)
+  phase        ImportPhase @default(UPLOADED)
+  sourceFileId String      @map("source_file_id") @db.Uuid
+  /// Fichier Excel de métadonnées complémentaire (import CSO)
+  metadataFileId String?   @map("metadata_file_id") @db.Uuid
+  vesselId     String?     @map("vessel_id") @db.Uuid
+  targetFolderId String?   @map("target_folder_id") @db.Uuid
+  /// Feuilles sélectionnées, mapping colonnes -> champs, options
+  options      Json        @default("{}")
+  summary      Json?
+  errorMessage String?     @map("error_message") @db.VarChar(1000)
+  createdById  String      @map("created_by_id") @db.Uuid
+  createdAt    DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  startedAt    DateTime?   @map("started_at") @db.Timestamptz(3)
+  finishedAt   DateTime?   @map("finished_at") @db.Timestamptz(3)
+
+  createdBy User        @relation(fields: [createdById], references: [id])
+  rows      ImportRow[]
+
+  @@index([kind, createdAt(sort: Desc)])
+  @@map("import_jobs")
+}
+
+model ImportRow {
+  id                  String            @id @default(uuid()) @db.Uuid
+  jobId               String            @map("job_id") @db.Uuid
+  sheetName           String            @default("") @map("sheet_name") @db.VarChar(120)
+  rowNumber           Int               @map("row_number")
+  raw                 Json
+  normalized          Json?
+  errors              Json?
+  warnings            Json?
+  duplicateCandidates Json?             @map("duplicate_candidates")
+  status              ImportRowStatus   @default(PENDING)
+  decision            ImportRowDecision @default(PENDING)
+  decisionTargetId    String?           @map("decision_target_id") @db.Uuid
+  decidedById         String?           @map("decided_by_id") @db.Uuid
+  decidedAt           DateTime?         @map("decided_at") @db.Timestamptz(3)
+  appliedEntityId     String?           @map("applied_entity_id") @db.Uuid
+  appliedAt           DateTime?         @map("applied_at") @db.Timestamptz(3)
+  errorMessage        String?           @map("error_message") @db.VarChar(1000)
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, sheetName, rowNumber])
+  @@index([jobId, status])
+  @@map("import_rows")
+}
+
+// =============================================================================
+// IDENTITY & ACCESS — utilisateurs, sessions, rôles, permissions, scopes, départements
+// =============================================================================
+
+enum UserStatus {
+  ACTIVE
+  DEACTIVATED
+}
+
+enum VesselScopeMode {
+  /// Toute la flotte, y compris les navires créés ultérieurement (ADM-003)
+  ALL_FLEET
+  SELECTED
+}
+
+model User {
+  id                 String          @id @default(uuid()) @db.Uuid
+  companyId          String          @map("company_id") @db.Uuid
+  /// Stocké normalisé (minuscules)
+  username           String          @unique @db.VarChar(64)
+  /// Normalisé (minuscules) ; unique lorsqu'il est présent
+  email              String?         @unique @db.VarChar(320)
+  emailVerifiedAt    DateTime?       @map("email_verified_at") @db.Timestamptz(3)
+  displayName        String          @map("display_name") @db.VarChar(200)
+  /// Argon2id
+  passwordHash       String          @map("password_hash") @db.VarChar(255)
+  mustChangePassword Boolean         @default(true) @map("must_change_password")
+  passwordChangedAt  DateTime?       @map("password_changed_at") @db.Timestamptz(3)
+  status             UserStatus      @default(ACTIVE)
+  failedLogins       Int             @default(0) @map("failed_logins")
+  lockedAt           DateTime?       @map("locked_at") @db.Timestamptz(3)
+  lastLoginAt        DateTime?       @map("last_login_at") @db.Timestamptz(3)
+  vesselScope        VesselScopeMode @default(SELECTED) @map("vessel_scope")
+  /// Lien facultatif 1:1 vers la fiche Member (ADM-031)
+  memberId           String?         @unique @map("member_id") @db.Uuid
+  jobTitle           String?         @map("job_title") @db.VarChar(120)
+  locale             String          @default("fr") @db.VarChar(8)
+  createdById        String?         @map("created_by_id") @db.Uuid
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deactivatedAt      DateTime?       @map("deactivated_at") @db.Timestamptz(3)
+
+  company             Company                @relation(fields: [companyId], references: [id])
+  member              Member?                @relation("UserMember", fields: [memberId], references: [id])
+  sessions            Session[]
+  roles               UserRole[]             @relation("UserRoles")
+  overrides           PermissionOverride[]   @relation("UserOverrides")
+  vesselAccess        UserVesselAccess[]     @relation("UserVesselAccess")
+  departments         DepartmentMembership[]
+  deputyOf            DepartmentDeputy[]
+  managedDepartments  Department[]           @relation("DepartmentPrimaryManager")
+  resetTokens         PasswordResetToken[]
+  notifications       Notification[]
+  uploadedFiles       StoredFile[]           @relation("FileUploader")
+  importJobs          ImportJob[]
+  exportJobs          ExportJob[]
+
+  @@index([companyId, status])
+  @@map("users")
+}
+
+model PasswordResetToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  /// SHA-256 du jeton à usage unique (jamais stocké en clair)
+  tokenHash   String    @unique @map("token_hash") @db.Char(64)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt      DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("password_reset_tokens")
+}
+
+model Session {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  /// SHA-256 du jeton de session (cookie HttpOnly)
+  tokenHash     String    @unique @map("token_hash") @db.Char(64)
+  deviceLabel   String?   @map("device_label") @db.VarChar(200)
+  userAgent     String?   @map("user_agent") @db.VarChar(400)
+  ip            String?   @db.VarChar(64)
+  fingerprint   String?   @db.VarChar(128)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt    DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedById   String?   @map("revoked_by_id") @db.Uuid
+  revokedReason String?   @map("revoked_reason") @db.VarChar(200)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique @db.VarChar(64)
+  name        String   @db.VarChar(120)
+  description String?  @db.VarChar(500)
+  /// Rôle système protégé (SUPER_ADMIN) : non modifiable, non supprimable
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  key         String  @id @db.VarChar(80)
+  module      String  @db.VarChar(40)
+  label       String  @db.VarChar(250)
+  isSensitive Boolean @default(false) @map("is_sensitive")
+
+  roles     RolePermission[]
+  overrides PermissionOverride[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId        String @map("role_id") @db.Uuid
+  permissionKey String @map("permission_key") @db.VarChar(80)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key])
+
+  @@id([roleId, permissionKey])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId       String   @map("user_id") @db.Uuid
+  roleId       String   @map("role_id") @db.Uuid
+  assignedById String?  @map("assigned_by_id") @db.Uuid
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
+
+  user User @relation("UserRoles", fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+enum OverrideEffect {
+  ALLOW
+  DENY
+}
+
+/// Exceptions individuelles : DENY > ALLOW > union des rôles (ADM-022)
+model PermissionOverride {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @map("user_id") @db.Uuid
+  permissionKey String         @map("permission_key") @db.VarChar(80)
+  effect        OverrideEffect
+  reason        String?        @db.VarChar(500)
+  createdById   String?        @map("created_by_id") @db.Uuid
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user       User       @relation("UserOverrides", fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key])
+
+  @@unique([userId, permissionKey])
+  @@map("permission_overrides")
+}
+
+/// Navires explicitement accessibles quand vessel_scope = SELECTED
+model UserVesselAccess {
+  userId      String   @map("user_id") @db.Uuid
+  vesselId    String   @map("vessel_id") @db.Uuid
+  grantedById String?  @map("granted_by_id") @db.Uuid
+  grantedAt   DateTime @default(now()) @map("granted_at") @db.Timestamptz(3)
+
+  user   User   @relation("UserVesselAccess", fields: [userId], references: [id], onDelete: Cascade)
+  vessel Vessel @relation(fields: [vesselId], references: [id])
+
+  @@id([userId, vesselId])
+  @@index([vesselId])
+  @@map("user_vessel_access")
+}
+
+enum DepartmentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Department {
+  id               String           @id @default(uuid()) @db.Uuid
+  code             String           @unique @db.VarChar(32)
+  name             String           @db.VarChar(120)
+  status           DepartmentStatus @default(ACTIVE)
+  primaryManagerId String?          @map("primary_manager_id") @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  primaryManager User?                  @relation("DepartmentPrimaryManager", fields: [primaryManagerId], references: [id])
+  memberships    DepartmentMembership[]
+  deputies       DepartmentDeputy[]
+
+  @@map("departments")
+}
+
+/// Un département principal (index partiel unique) + secondaires (ADM-024)
+model DepartmentMembership {
+  userId       String   @map("user_id") @db.Uuid
+  departmentId String   @map("department_id") @db.Uuid
+  isPrimary    Boolean  @default(false) @map("is_primary")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id])
+
+  @@id([userId, departmentId])
+  @@index([departmentId])
+  @@map("department_memberships")
+}
+
+model DepartmentDeputy {
+  departmentId String @map("department_id") @db.Uuid
+  userId       String @map("user_id") @db.Uuid
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([departmentId, userId])
+  @@map("department_deputies")
+}
+
+// =============================================================================
+// FLEET & CREW — navires, Members, affectations, champs personnalisés
+// =============================================================================
+
+enum VesselStatus {
+  ACTIVE
+  INACTIVE
+  LAID_UP
+  SOLD
+}
+
+model Vessel {
+  id               String       @id @default(uuid()) @db.Uuid
+  companyId        String       @map("company_id") @db.Uuid
+  code             String       @unique @db.VarChar(16)
+  name             String       @db.VarChar(120)
+  /// Numéro OMI 7 chiffres avec contrôle de clé (anti-doublon)
+  imoNumber        String?      @unique @map("imo_number") @db.VarChar(7)
+  mmsi             String?      @unique @db.VarChar(9)
+  callSign         String?      @map("call_sign") @db.VarChar(16)
+  /// Code pays ISO 3166-1 alpha-2 du pavillon
+  flag             String?      @db.VarChar(2)
+  portOfRegistry   String?      @map("port_of_registry") @db.VarChar(120)
+  vesselType       String?      @map("vessel_type") @db.VarChar(80)
+  status           VesselStatus @default(ACTIVE)
+  managerName      String?      @map("manager_name") @db.VarChar(200)
+  ownerName        String?      @map("owner_name") @db.VarChar(200)
+  classSociety     String?      @map("class_society") @db.VarChar(120)
+  yearBuilt        Int?         @map("year_built")
+  builder          String?      @db.VarChar(200)
+  grossTonnage     Decimal?     @map("gross_tonnage") @db.Decimal(12, 2)
+  netTonnage       Decimal?     @map("net_tonnage") @db.Decimal(12, 2)
+  deadweight       Decimal?     @db.Decimal(12, 2)
+  lengthOverall    Decimal?     @map("length_overall") @db.Decimal(8, 2)
+  beam             Decimal?     @db.Decimal(8, 2)
+  summerDraft      Decimal?     @map("summer_draft") @db.Decimal(6, 2)
+  /// Fuseau IANA pour l'affichage local (timestamps stockés en UTC)
+  timezone         String       @default("UTC") @db.VarChar(64)
+  contactEmail     String?      @map("contact_email") @db.VarChar(320)
+  contactPhone     String?      @map("contact_phone") @db.VarChar(64)
+  photoFileId      String?      @unique @map("photo_file_id") @db.Uuid
+  notes            String?
+  createdById      String?      @map("created_by_id") @db.Uuid
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company          Company              @relation(fields: [companyId], references: [id])
+  userAccess       UserVesselAccess[]
+  files            StoredFile[]
+  attachments      VesselAttachment[]
+  crewAssignments  CrewAssignment[]
+  certificates     Certificate[]
+  csoLibrary       CsoLibrary?
+  purchaseRequests PurchaseRequest[]
+  rfqs             Rfq[]
+  purchaseOrders   PurchaseOrder[]
+  deliveryNotes    DeliveryNote[]
+  goodsReceipts    GoodsReceipt[]
+  voyages          Voyage[]
+  noonReports      NoonReport[]
+  charterParties   CharterParty[]
+
+  @@index([companyId, status])
+  @@map("vessels")
+}
+
+model VesselAttachment {
+  id           String    @id @default(uuid()) @db.Uuid
+  vesselId     String    @map("vessel_id") @db.Uuid
+  fileId       String    @unique @map("file_id") @db.Uuid
+  category     String    @db.VarChar(60)
+  title        String    @db.VarChar(200)
+  uploadedById String    @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  archivedAt   DateTime? @map("archived_at") @db.Timestamptz(3)
+
+  vessel Vessel @relation(fields: [vesselId], references: [id])
+
+  @@index([vesselId, archivedAt])
+  @@map("vessel_attachments")
+}
+
+enum MemberStatus {
+  ON_BOARD
+  AVAILABLE
+  ON_LEAVE
+  PLANNED_JOIN
+  INACTIVE
+}
+
+enum CrewDepartment {
+  DECK
+  ENGINE
+  CATERING
+  OTHER
+}
+
+model Rank {
+  id             String         @id @default(uuid()) @db.Uuid
+  code           String         @unique @db.VarChar(32)
+  name           String         @db.VarChar(120)
+  crewDepartment CrewDepartment @map("crew_department")
+  sortOrder      Int            @default(0) @map("sort_order")
+  isActive       Boolean        @default(true) @map("is_active")
+
+  @@map("ranks")
+}
+
+/// Fiche unique d'une personne (marin ou personnel). Source des données personnelles communes.
+model Member {
+  id                    String          @id @default(uuid()) @db.Uuid
+  companyId             String          @map("company_id") @db.Uuid
+  /// Matricule AMC (clé de déduplication forte)
+  amcRef                String?         @unique @map("amc_ref") @db.VarChar(32)
+  firstName             String          @map("first_name") @db.VarChar(120)
+  lastName              String          @map("last_name") @db.VarChar(120)
+  birthDate             DateTime?       @map("birth_date") @db.Date
+  birthPlace            String?         @map("birth_place") @db.VarChar(120)
+  nationality           String?         @db.VarChar(2)
+  gender                String?         @db.VarChar(16)
+  email                 String?         @db.VarChar(320)
+  phone                 String?         @db.VarChar(64)
+  address               String?         @db.VarChar(500)
+  emergencyContactName  String?         @map("emergency_contact_name") @db.VarChar(200)
+  emergencyContactPhone String?         @map("emergency_contact_phone") @db.VarChar(64)
+  passportNumber        String?         @map("passport_number") @db.VarChar(32)
+  passportCountry       String?         @map("passport_country") @db.VarChar(2)
+  passportExpiry        DateTime?       @map("passport_expiry") @db.Date
+  seamanBookNumber      String?         @map("seaman_book_number") @db.VarChar(32)
+  seamanBookExpiry      DateTime?       @map("seaman_book_expiry") @db.Date
+  rank                  String?         @db.VarChar(120)
+  crewDepartment        CrewDepartment? @map("crew_department")
+  status                MemberStatus    @default(AVAILABLE)
+  /// Département AMC (personnel à terre)
+  departmentId          String?         @map("department_id") @db.Uuid
+  photoFileId           String?         @unique @map("photo_file_id") @db.Uuid
+  notes                 String?
+  createdById           String?         @map("created_by_id") @db.Uuid
+  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  archivedAt            DateTime?       @map("archived_at") @db.Timestamptz(3)
+
+  company         Company            @relation(fields: [companyId], references: [id])
+  user            User?              @relation("UserMember")
+  crewAssignments CrewAssignment[]
+  certificates    Certificate[]
+  fieldValues     MemberFieldValue[]
+  documents       MemberDocument[]
+
+  @@index([lastName, firstName, birthDate])
+  @@index([passportNumber])
+  @@index([seamanBookNumber])
+  @@index([status])
+  @@map("members")
+}
+
+model MemberDocument {
+  id           String    @id @default(uuid()) @db.Uuid
+  memberId     String    @map("member_id") @db.Uuid
+  fileId       String    @unique @map("file_id") @db.Uuid
+  category     String    @db.VarChar(60)
+  title        String    @db.VarChar(200)
+  uploadedById String    @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  archivedAt   DateTime? @map("archived_at") @db.Timestamptz(3)
+
+  member Member @relation(fields: [memberId], references: [id])
+
+  @@index([memberId])
+  @@map("member_documents")
+}
+
+enum CustomFieldType {
+  TEXT
+  NUMBER
+  DATE
+  SELECT
+  BOOLEAN
+}
+
+/// Sections personnalisées des fiches Members (ADM-038)
+model MemberFieldSection {
+  id         String    @id @default(uuid()) @db.Uuid
+  name       String    @db.VarChar(120)
+  sortOrder  Int       @default(0) @map("sort_order")
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  fields MemberFieldDefinition[]
+
+  @@map("member_field_sections")
+}
+
+/// Champs personnalisés Members uniquement (ADM-036/037) ; archivés, jamais supprimés (ADM-039)
+model MemberFieldDefinition {
+  id             String          @id @default(uuid()) @db.Uuid
+  sectionId      String?         @map("section_id") @db.Uuid
+  key            String          @unique @db.VarChar(64)
+  label          String          @db.VarChar(120)
+  type           CustomFieldType
+  options        Json?
+  required       Boolean         @default(false)
+  sortOrder      Int             @default(0) @map("sort_order")
+  /// Permission requise pour voir / éditer (null = members.view / members.edit)
+  viewPermission String?         @map("view_permission") @db.VarChar(80)
+  editPermission String?         @map("edit_permission") @db.VarChar(80)
+  selfEditable   Boolean         @default(false) @map("self_editable")
+  archivedAt     DateTime?       @map("archived_at") @db.Timestamptz(3)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  section MemberFieldSection? @relation(fields: [sectionId], references: [id])
+  values  MemberFieldValue[]
+
+  @@map("member_field_definitions")
+}
+
+model MemberFieldValue {
+  memberId    String   @map("member_id") @db.Uuid
+  fieldId     String   @map("field_id") @db.Uuid
+  value       Json
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  member Member                @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  field  MemberFieldDefinition @relation(fields: [fieldId], references: [id])
+
+  @@id([memberId, fieldId])
+  @@map("member_field_values")
+}
+
+enum CrewAssignmentStatus {
+  PLANNED
+  ONBOARD
+  COMPLETED
+  CANCELLED
+}
+
+/// Historique temporel Member <-> Vessel (embarquements / débarquements)
+model CrewAssignment {
+  id                   String               @id @default(uuid()) @db.Uuid
+  memberId             String               @map("member_id") @db.Uuid
+  vesselId             String               @map("vessel_id") @db.Uuid
+  rank                 String               @db.VarChar(120)
+  position             String?              @db.VarChar(120)
+  status               CrewAssignmentStatus @default(PLANNED)
+  plannedJoinDate      DateTime?            @map("planned_join_date") @db.Date
+  actualJoinDate       DateTime?            @map("actual_join_date") @db.Date
+  plannedSignOffDate   DateTime?            @map("planned_sign_off_date") @db.Date
+  actualSignOffDate    DateTime?            @map("actual_sign_off_date") @db.Date
+  joinPort             String?              @map("join_port") @db.VarChar(120)
+  signOffPort          String?              @map("sign_off_port") @db.VarChar(120)
+  voyageId             String?              @map("voyage_id") @db.Uuid
+  relievesAssignmentId String?              @map("relieves_assignment_id") @db.Uuid
+  notes                String?
+  createdById          String?              @map("created_by_id") @db.Uuid
+  createdAt            DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  member Member  @relation(fields: [memberId], references: [id])
+  vessel Vessel  @relation(fields: [vesselId], references: [id])
+  voyage Voyage? @relation(fields: [voyageId], references: [id])
+
+  @@index([vesselId, status])
+  @@index([memberId, status])
+  @@map("crew_assignments")
+}
+
+// =============================================================================
+// CERTIFICATES — moteur commun VESSEL / MEMBER (CDC §4, priorité critique)
+// =============================================================================
+
+enum CertificateSubjectKind {
+  VESSEL
+  MEMBER
+}
+
+enum ExpiryKind {
+  DATED
+  UNLIMITED
+  UNKNOWN
+}
+
+enum ReminderFrequency {
+  /// Une notification par seuil franchi (ex. 90/60/30/7 j)
+  AT_THRESHOLDS
+  DAILY
+  WEEKLY
+  CUSTOM
+}
+
+/// Politique de rappels configurée par le Super Admin (ADM-044..047, 063, 065)
+model ReminderPolicy {
+  id                          String            @id @default(uuid()) @db.Uuid
+  name                        String            @unique @db.VarChar(120)
+  thresholdsDays              Int[]             @map("thresholds_days")
+  frequency                   ReminderFrequency @default(AT_THRESHOLDS)
+  /// Intervalle (jours) pour CUSTOM, appliqué à l'intérieur du plus grand seuil
+  customIntervalDays          Int?              @map("custom_interval_days")
+  /// Rappels après expiration : intervalle en jours (null = aucun)
+  postExpiryIntervalDays      Int?              @map("post_expiry_interval_days")
+  postExpiryMaxReminders      Int?              @map("post_expiry_max_reminders")
+  /// Rappel de complétion pour date d'expiration UNKNOWN (null = désactivé)
+  unknownExpiryIntervalDays   Int?              @map("unknown_expiry_interval_days")
+  /// Rappel pièce officielle manquante (null = désactivé)
+  missingDocumentIntervalDays Int?              @map("missing_document_interval_days")
+  /// Escalade si approbation en attente au-delà de N heures
+  approvalOverdueHours        Int?              @map("approval_overdue_hours")
+  escalationRoleId            String?           @map("escalation_role_id") @db.Uuid
+  createdAt                   DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  recipients ReminderPolicyRecipient[]
+  types      CertificateType[]
+
+  @@map("reminder_policies")
+}
+
+enum PrincipalType {
+  USER
+  ROLE
+  DEPARTMENT
+}
+
+model ReminderPolicyRecipient {
+  id            String        @id @default(uuid()) @db.Uuid
+  policyId      String        @map("policy_id") @db.Uuid
+  principalType PrincipalType @map("principal_type")
+  principalId   String        @map("principal_id") @db.Uuid
+
+  policy ReminderPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@unique([policyId, principalType, principalId])
+  @@map("reminder_policy_recipients")
+}
+
+model CertificateType {
+  id                   String                 @id @default(uuid()) @db.Uuid
+  code                 String                 @unique @db.VarChar(40)
+  name                 String                 @db.VarChar(200)
+  subjectKind          CertificateSubjectKind @map("subject_kind")
+  category             String                 @db.VarChar(60)
+  description          String?
+  defaultValidityMonths Int?                  @map("default_validity_months")
+  requiresDocument     Boolean                @default(true) @map("requires_document")
+  /// Plusieurs certificats courants simultanés autorisés pour un même sujet/type
+  allowMultiple        Boolean                @default(false) @map("allow_multiple")
+  reminderPolicyId     String?                @map("reminder_policy_id") @db.Uuid
+  isActive             Boolean                @default(true) @map("is_active")
+  sortOrder            Int                    @default(0) @map("sort_order")
+  createdAt            DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  reminderPolicy ReminderPolicy?            @relation(fields: [reminderPolicyId], references: [id])
+  validators     CertificateTypeValidator[]
+  certificates   Certificate[]
+
+  @@index([subjectKind, isActive])
+  @@map("certificate_types")
+}
+
+/// Validateurs éligibles par type (ADM-051) : en plus de Approve Certificate + accès navire
+model CertificateTypeValidator {
+  id            String        @id @default(uuid()) @db.Uuid
+  typeId        String        @map("type_id") @db.Uuid
+  principalType PrincipalType @map("principal_type")
+  principalId   String        @map("principal_id") @db.Uuid
+
+  type CertificateType @relation(fields: [typeId], references: [id], onDelete: Cascade)
+
+  @@unique([typeId, principalType, principalId])
+  @@map("certificate_type_validators")
+}
+
+enum RenewalStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+/// Certificat logique (sujet + type). Révisions officielles = certificate_revisions.
+model Certificate {
+  id                String                 @id @default(uuid()) @db.Uuid
+  subjectKind       CertificateSubjectKind @map("subject_kind")
+  vesselId          String?                @map("vessel_id") @db.Uuid
+  memberId          String?                @map("member_id") @db.Uuid
+  typeId            String                 @map("type_id") @db.Uuid
+  currentRevisionId String?                @unique @map("current_revision_id") @db.Uuid
+  /// Dénormalisation de la révision courante (tableaux de bord / rappels)
+  currentNumber     String?                @map("current_number") @db.VarChar(120)
+  currentExpiryKind ExpiryKind?            @map("current_expiry_kind")
+  currentExpiryOn   DateTime?              @map("current_expiry_on") @db.Date
+  /// Vrai si la révision courante n'a pas de pièce OFFICIAL (badge Document Missing)
+  documentMissing   Boolean                @default(true) @map("document_missing")
+  renewalStatus     RenewalStatus          @default(NOT_STARTED) @map("renewal_status")
+  renewalOwnerId    String?                @map("renewal_owner_id") @db.Uuid
+  createdById       String                 @map("created_by_id") @db.Uuid
+  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+  archivedAt        DateTime?              @map("archived_at") @db.Timestamptz(3)
+  archivedById      String?                @map("archived_by_id") @db.Uuid
+  archiveReason     String?                @map("archive_reason") @db.VarChar(500)
+
+  vessel          Vessel?                      @relation(fields: [vesselId], references: [id])
+  member          Member?                      @relation(fields: [memberId], references: [id])
+  type            CertificateType              @relation(fields: [typeId], references: [id])
+  currentRevision CertificateRevision?         @relation("CurrentRevision", fields: [currentRevisionId], references: [id])
+  revisions       CertificateRevision[]        @relation("CertificateRevisions")
+  requests        CertificateApprovalRequest[]
+  attachments     CertificateAttachment[]
+  renewalTasks    CertificateRenewalTask[]
+  comments        CertificateComment[]
+
+  @@index([vesselId, typeId])
+  @@index([memberId, typeId])
+  @@index([currentExpiryKind, currentExpiryOn])
+  @@map("certificates")
+}
+
+enum RevisionLifecycle {
+  CURRENT
+  ARCHIVED
+}
+
+/// Révision officielle IMMUABLE (créée uniquement à l'approbation d'une demande).
+/// Index partiel : une seule révision CURRENT par certificat.
+model CertificateRevision {
+  id                String            @id @default(uuid()) @db.Uuid
+  certificateId     String            @map("certificate_id") @db.Uuid
+  revisionNo        Int               @map("revision_no")
+  certificateNumber String?           @map("certificate_number") @db.VarChar(120)
+  issuer            String?           @db.VarChar(200)
+  authority         String?           @db.VarChar(200)
+  country           String?           @db.VarChar(2)
+  placeOfIssue      String?           @map("place_of_issue") @db.VarChar(120)
+  issuedOn          DateTime?         @map("issued_on") @db.Date
+  validFrom         DateTime?         @map("valid_from") @db.Date
+  expiryKind        ExpiryKind        @map("expiry_kind")
+  expiryOn          DateTime?         @map("expiry_on") @db.Date
+  remarks           String?
+  lifecycle         RevisionLifecycle @default(CURRENT)
+  approvedRequestId String            @unique @map("approved_request_id") @db.Uuid
+  approvedById      String            @map("approved_by_id") @db.Uuid
+  approvedAt        DateTime          @map("approved_at") @db.Timestamptz(3)
+  archivedAt        DateTime?         @map("archived_at") @db.Timestamptz(3)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  certificate      Certificate                @relation("CertificateRevisions", fields: [certificateId], references: [id])
+  currentOf        Certificate?               @relation("CurrentRevision")
+  approvedRequest  CertificateApprovalRequest @relation("RequestRevision", fields: [approvedRequestId], references: [id])
+  attachments      CertificateAttachment[]
+
+  @@unique([certificateId, revisionNo])
+  @@map("certificate_revisions")
+}
+
+enum CertificateRequestKind {
+  CREATE
+  RENEWAL
+  CORRECTION
+  /// Pièce jointe ajoutée / remplacée après validation (ADM-066/067)
+  ATTACHMENT
+}
+
+enum ApprovalStatus {
+  DRAFT
+  PENDING_APPROVAL
+  RETURNED
+  REJECTED
+  APPROVED
+  CANCELLED
+}
+
+/// Demande d'approbation (création / renouvellement / correction / pièce jointe).
+/// `version` = verrou optimiste : chaque modification crée une version immuable
+/// et une approbation sur une version périmée est refusée (409).
+model CertificateApprovalRequest {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  certificateId         String                 @map("certificate_id") @db.Uuid
+  kind                  CertificateRequestKind
+  status                ApprovalStatus         @default(DRAFT)
+  version               Int                    @default(1)
+  requestedById         String                 @map("requested_by_id") @db.Uuid
+  submittedAt           DateTime?              @map("submitted_at") @db.Timestamptz(3)
+  decidedById           String?                @map("decided_by_id") @db.Uuid
+  decidedAt             DateTime?              @map("decided_at") @db.Timestamptz(3)
+  decisionComment       String?                @map("decision_comment")
+  cancelReason          String?                @map("cancel_reason")
+  duplicatedFromId      String?                @map("duplicated_from_id") @db.Uuid
+  /// Pour kind=ATTACHMENT : pièce candidate
+  attachmentId          String?                @unique @map("attachment_id") @db.Uuid
+  lastReminderAt        DateTime?              @map("last_reminder_at") @db.Timestamptz(3)
+  escalatedAt           DateTime?              @map("escalated_at") @db.Timestamptz(3)
+  createdAt             DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  certificate       Certificate                   @relation(fields: [certificateId], references: [id])
+  versions          CertificateRequestVersion[]
+  decisions         CertificateApprovalDecision[]
+  resultingRevision CertificateRevision?          @relation("RequestRevision")
+  attachment        CertificateAttachment?        @relation("AttachmentRequest", fields: [attachmentId], references: [id])
+  duplicatedFrom    CertificateApprovalRequest?   @relation("RequestDuplicate", fields: [duplicatedFromId], references: [id])
+  duplicates        CertificateApprovalRequest[]  @relation("RequestDuplicate")
+
+  @@index([status, submittedAt])
+  @@index([certificateId, status])
+  @@index([requestedById])
+  @@map("certificate_approval_requests")
+}
+
+/// Snapshot immuable des données proposées pour une version de demande
+model CertificateRequestVersion {
+  id                String     @id @default(uuid()) @db.Uuid
+  requestId         String     @map("request_id") @db.Uuid
+  versionNo         Int        @map("version_no")
+  certificateNumber String?    @map("certificate_number") @db.VarChar(120)
+  issuer            String?    @db.VarChar(200)
+  authority         String?    @db.VarChar(200)
+  country           String?    @db.VarChar(2)
+  placeOfIssue      String?    @map("place_of_issue") @db.VarChar(120)
+  issuedOn          DateTime?  @map("issued_on") @db.Date
+  validFrom         DateTime?  @map("valid_from") @db.Date
+  expiryKind        ExpiryKind @map("expiry_kind")
+  expiryOn          DateTime?  @map("expiry_on") @db.Date
+  remarks           String?
+  /// Pièce jointe proposée avec cette version (facultative, ADM-064)
+  fileId            String?    @map("file_id") @db.Uuid
+  changeNote        String?    @map("change_note") @db.VarChar(500)
+  createdById       String     @map("created_by_id") @db.Uuid
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  request CertificateApprovalRequest @relation(fields: [requestId], references: [id])
+
+  @@unique([requestId, versionNo])
+  @@map("certificate_request_versions")
+}
+
+enum ApprovalDecisionKind {
+  APPROVE
+  REJECT
+  RETURN
+}
+
+model CertificateApprovalDecision {
+  id         String               @id @default(uuid()) @db.Uuid
+  requestId  String               @map("request_id") @db.Uuid
+  versionNo  Int                  @map("version_no")
+  deciderId  String               @map("decider_id") @db.Uuid
+  decision   ApprovalDecisionKind
+  comment    String?
+  createdAt  DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  request CertificateApprovalRequest @relation(fields: [requestId], references: [id])
+
+  @@index([requestId])
+  @@map("certificate_approval_decisions")
+}
+
+enum AttachmentStatus {
+  PENDING_APPROVAL
+  OFFICIAL
+  ARCHIVED
+  REJECTED
+}
+
+/// Pièces jointes de certificat. Index partiel : une seule OFFICIAL par révision.
+model CertificateAttachment {
+  id            String           @id @default(uuid()) @db.Uuid
+  certificateId String           @map("certificate_id") @db.Uuid
+  revisionId    String?          @map("revision_id") @db.Uuid
+  fileId        String           @unique @map("file_id") @db.Uuid
+  status        AttachmentStatus @default(PENDING_APPROVAL)
+  uploadedById  String           @map("uploaded_by_id") @db.Uuid
+  uploadedAt    DateTime         @default(now()) @map("uploaded_at") @db.Timestamptz(3)
+  approvedById  String?          @map("approved_by_id") @db.Uuid
+  approvedAt    DateTime?        @map("approved_at") @db.Timestamptz(3)
+  archivedAt    DateTime?        @map("archived_at") @db.Timestamptz(3)
+
+  certificate Certificate                 @relation(fields: [certificateId], references: [id])
+  revision    CertificateRevision?        @relation(fields: [revisionId], references: [id])
+  request     CertificateApprovalRequest? @relation("AttachmentRequest")
+
+  @@index([certificateId, status])
+  @@map("certificate_attachments")
+}
+
+/// Suivi opérationnel du renouvellement : n'affecte jamais la validité ni les alertes (ADM-048)
+model CertificateRenewalTask {
+  id            String        @id @default(uuid()) @db.Uuid
+  certificateId String        @map("certificate_id") @db.Uuid
+  ownerId       String?       @map("owner_id") @db.Uuid
+  status        RenewalStatus @default(IN_PROGRESS)
+  dueOn         DateTime?     @map("due_on") @db.Date
+  createdById   String        @map("created_by_id") @db.Uuid
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt   DateTime?     @map("completed_at") @db.Timestamptz(3)
+
+  certificate Certificate @relation(fields: [certificateId], references: [id])
+
+  @@index([certificateId, status])
+  @@map("certificate_renewal_tasks")
+}
+
+model CertificateComment {
+  id            String   @id @default(uuid()) @db.Uuid
+  certificateId String   @map("certificate_id") @db.Uuid
+  authorId      String   @map("author_id") @db.Uuid
+  body          String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  certificate Certificate @relation(fields: [certificateId], references: [id])
+
+  @@index([certificateId, createdAt])
+  @@map("certificate_comments")
+}
+
+// =============================================================================
+// CSO DMS — bibliothèque documentaire de sûreté (CDC §5)
+// =============================================================================
+
+enum CsoLibraryKind {
+  CENTRAL
+  VESSEL
+}
+
+model CsoLibrary {
+  id        String         @id @default(uuid()) @db.Uuid
+  kind      CsoLibraryKind
+  vesselId  String?        @unique @map("vessel_id") @db.Uuid
+  name      String         @db.VarChar(200)
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  vessel    Vessel?       @relation(fields: [vesselId], references: [id])
+  folders   CsoFolder[]
+  documents CsoDocument[]
+
+  @@map("cso_libraries")
+}
+
+enum CsoItemStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+/// Arborescence matérialisée : path = "/<id racine>/.../<id>/" (recalcul des descendants au move)
+model CsoFolder {
+  id           String        @id @default(uuid()) @db.Uuid
+  libraryId    String        @map("library_id") @db.Uuid
+  parentId     String?       @map("parent_id") @db.Uuid
+  name         String        @db.VarChar(200)
+  path         String        @db.VarChar(4000)
+  depth        Int           @default(0)
+  inheritAcl   Boolean       @default(true) @map("inherit_acl")
+  status       CsoItemStatus @default(ACTIVE)
+  archivedAt   DateTime?     @map("archived_at") @db.Timestamptz(3)
+  archivedById String?       @map("archived_by_id") @db.Uuid
+  createdById  String        @map("created_by_id") @db.Uuid
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  library    CsoLibrary           @relation(fields: [libraryId], references: [id])
+  parent     CsoFolder?           @relation("FolderTree", fields: [parentId], references: [id])
+  children   CsoFolder[]          @relation("FolderTree")
+  documents  CsoDocument[]
+  acl        CsoAclEntry[]
+  validators CsoFolderValidator[]
+
+  @@index([libraryId, parentId])
+  @@index([path])
+  @@map("cso_folders")
+}
+
+enum AclEffect {
+  ALLOW
+  DENY
+}
+
+/// ACL dossier/document héritées du parent ; DENY prioritaire ; jamais au-delà de la permission module
+model CsoAclEntry {
+  id            String        @id @default(uuid()) @db.Uuid
+  folderId      String?       @map("folder_id") @db.Uuid
+  documentId    String?       @map("document_id") @db.Uuid
+  principalType PrincipalType @map("principal_type")
+  principalId   String        @map("principal_id") @db.Uuid
+  /// Actions : view, preview, download, view_archived, download_archived, edit,
+  /// folder_create, folder_rename, folder_move, folder_archive, acl_manage, approve, restore, share
+  actions       String[]
+  effect        AclEffect     @default(ALLOW)
+  createdById   String        @map("created_by_id") @db.Uuid
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  folder   CsoFolder?   @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  document CsoDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([folderId])
+  @@index([documentId])
+  @@map("cso_acl_entries")
+}
+
+/// Validateurs définis par dossier (CSO-006)
+model CsoFolderValidator {
+  id            String        @id @default(uuid()) @db.Uuid
+  folderId      String        @map("folder_id") @db.Uuid
+  principalType PrincipalType @map("principal_type")
+  principalId   String        @map("principal_id") @db.Uuid
+
+  folder CsoFolder @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  @@unique([folderId, principalType, principalId])
+  @@map("cso_folder_validators")
+}
+
+enum CategoryScope {
+  FLEET
+  VESSEL
+}
+
+enum ReferenceMode {
+  AUTO
+  MANUAL
+}
+
+model CsoCategory {
+  id              String        @id @default(uuid()) @db.Uuid
+  code            String        @unique @db.VarChar(40)
+  name            String        @db.VarChar(200)
+  scope           CategoryScope @default(FLEET)
+  vesselId        String?       @map("vessel_id") @db.Uuid
+  referenceMode   ReferenceMode @default(AUTO) @map("reference_mode")
+  /// Ex. "CSO-{CAT}-{VESSEL}-{YYYY}-{SEQ:4}"
+  referenceFormat String?       @map("reference_format") @db.VarChar(120)
+  /// Champs standards obligatoires : ["description","nextReviewOn",...]
+  requiredFields  String[]      @default([]) @map("required_fields")
+  isActive        Boolean       @default(true) @map("is_active")
+  sortOrder       Int           @default(0) @map("sort_order")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  fields    CsoFieldDefinition[]
+  documents CsoDocument[]
+
+  @@map("cso_categories")
+}
+
+model CsoFieldDefinition {
+  id             String          @id @default(uuid()) @db.Uuid
+  categoryId     String?         @map("category_id") @db.Uuid
+  key            String          @db.VarChar(64)
+  label          String          @db.VarChar(120)
+  type           CustomFieldType
+  options        Json?
+  required       Boolean         @default(false)
+  isConfidential Boolean         @default(false) @map("is_confidential")
+  sortOrder      Int             @default(0) @map("sort_order")
+  archivedAt     DateTime?       @map("archived_at") @db.Timestamptz(3)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  category CsoCategory?    @relation(fields: [categoryId], references: [id])
+  acl      CsoFieldAcl[]
+  values   CsoFieldValue[]
+
+  @@unique([categoryId, key])
+  @@map("cso_field_definitions")
+}
+
+/// Visibilité / édition par champ (CSO-031/032)
+model CsoFieldAcl {
+  id            String        @id @default(uuid()) @db.Uuid
+  fieldId       String        @map("field_id") @db.Uuid
+  principalType PrincipalType @map("principal_type")
+  principalId   String        @map("principal_id") @db.Uuid
+  canView       Boolean       @default(true) @map("can_view")
+  canEdit       Boolean       @default(false) @map("can_edit")
+
+  field CsoFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  @@unique([fieldId, principalType, principalId])
+  @@map("cso_field_acl")
+}
+
+model CsoFieldValue {
+  documentId  String   @map("document_id") @db.Uuid
+  fieldId     String   @map("field_id") @db.Uuid
+  value       Json
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  document CsoDocument        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  field    CsoFieldDefinition @relation(fields: [fieldId], references: [id])
+
+  @@id([documentId, fieldId])
+  @@map("cso_field_values")
+}
+
+enum CsoDocumentStatus {
+  /// Jamais publié (première version en préparation / attente)
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model CsoDocument {
+  id               String            @id @default(uuid()) @db.Uuid
+  libraryId        String            @map("library_id") @db.Uuid
+  folderId         String            @map("folder_id") @db.Uuid
+  vesselId         String?           @map("vessel_id") @db.Uuid
+  categoryId       String?           @map("category_id") @db.Uuid
+  /// Référence officielle unique (CSO-026)
+  reference        String?           @unique @db.VarChar(120)
+  title            String            @db.VarChar(300)
+  description      String?
+  authorId         String            @map("author_id") @db.Uuid
+  status           CsoDocumentStatus @default(DRAFT)
+  currentVersionId String?           @unique @map("current_version_id") @db.Uuid
+  nextReviewOn     DateTime?         @map("next_review_on") @db.Date
+  expiryOn         DateTime?         @map("expiry_on") @db.Date
+  inheritAcl       Boolean           @default(true) @map("inherit_acl")
+  copiedFromId     String?           @map("copied_from_id") @db.Uuid
+  archivedAt       DateTime?         @map("archived_at") @db.Timestamptz(3)
+  archivedById     String?           @map("archived_by_id") @db.Uuid
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// tsvector GÉNÉRÉ (référence + titre + description) : voir migration 0002
+  searchVector     Unsupported("tsvector")? @map("search_tsv")
+
+  library          CsoLibrary                  @relation(fields: [libraryId], references: [id])
+  folder           CsoFolder                   @relation(fields: [folderId], references: [id])
+  category         CsoCategory?                @relation(fields: [categoryId], references: [id])
+  currentVersion   CsoVersion?                 @relation("CsoCurrentVersion", fields: [currentVersionId], references: [id])
+  versions         CsoVersion[]                @relation("CsoDocumentVersions")
+  acl              CsoAclEntry[]
+  fieldValues      CsoFieldValue[]
+  shares           CsoShare[]
+  referenceChanges CsoReferenceChangeRequest[]
+  copiedFrom       CsoDocument?                @relation("CsoCopy", fields: [copiedFromId], references: [id])
+  copies           CsoDocument[]               @relation("CsoCopy")
+
+  @@index([folderId, status])
+  @@index([vesselId, status])
+  @@index([searchVector], type: Gin)
+  @@map("cso_documents")
+}
+
+enum CsoVersionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  RETURNED
+  REJECTED
+  /// Version officielle courante
+  PUBLISHED
+  /// Ancienne version officielle archivée
+  SUPERSEDED
+  CANCELLED
+}
+
+/// Version documentaire immuable (blob + SHA-256 via files)
+model CsoVersion {
+  id              String           @id @default(uuid()) @db.Uuid
+  documentId      String           @map("document_id") @db.Uuid
+  versionNo       Int              @map("version_no")
+  fileId          String           @unique @map("file_id") @db.Uuid
+  status          CsoVersionStatus @default(DRAFT)
+  changeNote      String?          @map("change_note") @db.VarChar(1000)
+  /// Version créée par restauration d'archive (CSO-011)
+  isRestoration   Boolean          @default(false) @map("is_restoration")
+  lockVersion     Int              @default(1) @map("lock_version")
+  submittedById   String           @map("submitted_by_id") @db.Uuid
+  submittedAt     DateTime?        @map("submitted_at") @db.Timestamptz(3)
+  decidedById     String?          @map("decided_by_id") @db.Uuid
+  decidedAt       DateTime?        @map("decided_at") @db.Timestamptz(3)
+  decisionComment String?          @map("decision_comment")
+  publishedAt     DateTime?        @map("published_at") @db.Timestamptz(3)
+  supersededAt    DateTime?        @map("superseded_at") @db.Timestamptz(3)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  document  CsoDocument  @relation("CsoDocumentVersions", fields: [documentId], references: [id])
+  currentOf CsoDocument? @relation("CsoCurrentVersion")
+
+  @@unique([documentId, versionNo])
+  @@index([status, submittedAt])
+  @@map("cso_versions")
+}
+
+/// Changement de référence officielle soumis à approbation distincte (CSO-027)
+model CsoReferenceChangeRequest {
+  id              String         @id @default(uuid()) @db.Uuid
+  documentId      String         @map("document_id") @db.Uuid
+  oldReference    String?        @map("old_reference") @db.VarChar(120)
+  newReference    String         @map("new_reference") @db.VarChar(120)
+  reason          String?        @db.VarChar(500)
+  status          ApprovalStatus @default(PENDING_APPROVAL)
+  requestedById   String         @map("requested_by_id") @db.Uuid
+  decidedById     String?        @map("decided_by_id") @db.Uuid
+  decidedAt       DateTime?      @map("decided_at") @db.Timestamptz(3)
+  decisionComment String?        @map("decision_comment")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  document CsoDocument @relation(fields: [documentId], references: [id])
+
+  @@index([documentId, status])
+  @@map("cso_reference_change_requests")
+}
+
+/// Partage interne authentifié (jamais public) — révocable individuellement ou globalement
+model CsoShare {
+  id                    String    @id @default(uuid()) @db.Uuid
+  documentId            String    @map("document_id") @db.Uuid
+  sharedById            String    @map("shared_by_id") @db.Uuid
+  recipientUserId       String?   @map("recipient_user_id") @db.Uuid
+  recipientDepartmentId String?   @map("recipient_department_id") @db.Uuid
+  message               String?   @db.VarChar(1000)
+  allowDownload         Boolean   @default(false) @map("allow_download")
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  revokedAt             DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedById           String?   @map("revoked_by_id") @db.Uuid
+
+  document CsoDocument @relation(fields: [documentId], references: [id])
+
+  @@index([recipientUserId, revokedAt])
+  @@index([recipientDepartmentId, revokedAt])
+  @@index([documentId])
+  @@map("cso_shares")
+}
+
+// =============================================================================
+// PURCHASING — PR, Counter-PR, RFQ, devis, BC/PO, BL, réception, écarts, factures
+// =============================================================================
+
+model Supplier {
+  id           String    @id @default(uuid()) @db.Uuid
+  companyId    String    @map("company_id") @db.Uuid
+  code         String    @unique @db.VarChar(32)
+  name         String    @db.VarChar(200)
+  legalName    String?   @map("legal_name") @db.VarChar(250)
+  email        String?   @db.VarChar(320)
+  phone        String?   @db.VarChar(64)
+  address      String?   @db.VarChar(500)
+  country      String?   @db.VarChar(2)
+  /// ISO 4217
+  currency     String?   @db.Char(3)
+  paymentTerms String?   @map("payment_terms") @db.VarChar(250)
+  taxId        String?   @map("tax_id") @db.VarChar(64)
+  isActive     Boolean   @default(true) @map("is_active")
+  notes        String?
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  company        Company           @relation(fields: [companyId], references: [id])
+  contacts       SupplierContact[]
+  rfqSuppliers   RfqSupplier[]
+  quotations     Quotation[]
+  purchaseOrders PurchaseOrder[]
+  deliveryNotes  DeliveryNote[]
+  invoices       Invoice[]
+
+  @@index([name])
+  @@map("suppliers")
+}
+
+model SupplierContact {
+  id         String  @id @default(uuid()) @db.Uuid
+  supplierId String  @map("supplier_id") @db.Uuid
+  name       String  @db.VarChar(200)
+  email      String? @db.VarChar(320)
+  phone      String? @db.VarChar(64)
+  role       String? @db.VarChar(120)
+  isPrimary  Boolean @default(false) @map("is_primary")
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@map("supplier_contacts")
+}
+
+enum PrStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  REVISED
+  APPROVED
+  SOURCING
+  PARTIALLY_ORDERED
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CLOSED
+  CANCELLED
+  REJECTED
+  ON_HOLD
+  /// PR mère divisée en sous-PR (lecture seule ; chaque sous-PR suit son propre circuit BC / BL)
+  SPLIT
+}
+
+enum PrPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model PurchaseRequest {
+  id              String     @id @default(uuid()) @db.Uuid
+  /// Ex. "ISK-PR-2026-0323"
+  number          String     @unique @db.VarChar(40)
+  vesselId        String     @map("vessel_id") @db.Uuid
+  departmentId    String?    @map("department_id") @db.Uuid
+  requesterId     String     @map("requester_id") @db.Uuid
+  requestDate     DateTime   @map("request_date") @db.Date
+  category        String     @db.VarChar(120)
+  priority        PrPriority @default(NORMAL)
+  neededBy        DateTime?  @map("needed_by") @db.Date
+  subject         String     @db.VarChar(300)
+  comment         String?
+  /// Référence du formulaire source (ex. "FORM 41 - Rev N°00")
+  formRef         String?    @map("form_ref") @db.VarChar(80)
+  status          PrStatus   @default(DRAFT)
+  /// Circuit de revue appliqué (tracé, CDC §6.4)
+  reviewCircuit   Json?      @map("review_circuit")
+  currentRevisionNo Int      @default(0) @map("current_revision_no")
+  /// Sous-PR : PR mère dont elle est issue (division par fournisseur, lignes entières)
+  parentId        String?    @map("parent_id") @db.Uuid
+  submittedAt     DateTime?  @map("submitted_at") @db.Timestamptz(3)
+  approvedById    String?    @map("approved_by_id") @db.Uuid
+  approvedAt      DateTime?  @map("approved_at") @db.Timestamptz(3)
+  closedAt        DateTime?  @map("closed_at") @db.Timestamptz(3)
+  cancelledAt     DateTime?  @map("cancelled_at") @db.Timestamptz(3)
+  cancelReason    String?    @map("cancel_reason") @db.VarChar(500)
+  lockVersion     Int        @default(1) @map("lock_version")
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel    Vessel            @relation(fields: [vesselId], references: [id])
+  parent    PurchaseRequest?  @relation("PrSplit", fields: [parentId], references: [id])
+  children  PurchaseRequest[] @relation("PrSplit")
+  lines     PrLine[]
+  revisions PrRevision[]
+  comments  PrComment[]
+
+  @@index([vesselId, status, createdAt(sort: Desc)])
+  @@index([requesterId])
+  @@index([parentId])
+  @@map("purchase_requests")
+}
+
+enum LineStatus {
+  OPEN
+  CANCELLED
+}
+
+/// Ligne PR immuable après soumission (les changements passent par PrRevision)
+model PrLine {
+  id                String     @id @default(uuid()) @db.Uuid
+  prId              String     @map("pr_id") @db.Uuid
+  lineNo            Int        @map("line_no")
+  designation       String     @db.VarChar(500)
+  reference         String?    @db.VarChar(200)
+  quantityRequested Decimal    @map("quantity_requested") @db.Decimal(18, 3)
+  /// Unité textuelle validée (pcs, L, bidon, m, kg…) — pas d'unité forcée
+  unit              String     @db.VarChar(32)
+  /// Remaining On Board (texte libre accepté si hétérogène)
+  rob               String?    @db.VarChar(64)
+  remarks           String?    @db.VarChar(1000)
+  catalogItemId     String?    @map("catalog_item_id") @db.Uuid
+  /// Origine : ligne ajoutée par une Counter-PR acceptée
+  addedByRevisionId String?    @map("added_by_revision_id") @db.Uuid
+  /// Sous-PR : ligne de la PR mère dont celle-ci est la copie
+  sourceLineId      String?    @map("source_line_id") @db.Uuid
+  /// Quantité approuvée (après révision acceptée) — base des allocations BC
+  quantityApproved  Decimal?   @map("quantity_approved") @db.Decimal(18, 3)
+  quantityCancelled Decimal    @default(0) @map("quantity_cancelled") @db.Decimal(18, 3)
+  status            LineStatus @default(OPEN)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  pr          PurchaseRequest    @relation(fields: [prId], references: [id], onDelete: Cascade)
+  rfqLines    RfqLine[]
+  allocations PoLineAllocation[]
+
+  @@unique([prId, lineNo])
+  @@map("pr_lines")
+}
+
+enum PrRevisionKind {
+  COUNTER_PR
+  REVISION
+}
+
+enum PrRevisionStatus {
+  PROPOSED
+  ACCEPTED
+  REJECTED
+  CORRECTION_REQUESTED
+  WITHDRAWN
+}
+
+/// Counter-PR / Revised PR : proposition versionnée sans effacer la PR originale
+model PrRevision {
+  id              String           @id @default(uuid()) @db.Uuid
+  prId            String           @map("pr_id") @db.Uuid
+  revisionNo      Int              @map("revision_no")
+  kind            PrRevisionKind   @default(COUNTER_PR)
+  status          PrRevisionStatus @default(PROPOSED)
+  justification   String?
+  proposedById    String           @map("proposed_by_id") @db.Uuid
+  proposedAt      DateTime         @default(now()) @map("proposed_at") @db.Timestamptz(3)
+  decidedById     String?          @map("decided_by_id") @db.Uuid
+  decidedAt       DateTime?        @map("decided_at") @db.Timestamptz(3)
+  decisionComment String?          @map("decision_comment")
+  /// Modifications d'en-tête appliquées par la Counter-PR : { champ: { before, after } }
+  headerChanges   Json?            @map("header_changes")
+
+  pr    PurchaseRequest  @relation(fields: [prId], references: [id], onDelete: Cascade)
+  lines PrRevisionLine[]
+
+  @@unique([prId, revisionNo])
+  @@map("pr_revisions")
+}
+
+enum RevisionLineAction {
+  KEEP
+  CHANGE
+  ADD
+  REMOVE
+}
+
+model PrRevisionLine {
+  id          String             @id @default(uuid()) @db.Uuid
+  revisionId  String             @map("revision_id") @db.Uuid
+  prLineId    String?            @map("pr_line_id") @db.Uuid
+  action      RevisionLineAction
+  designation String             @db.VarChar(500)
+  reference   String?            @db.VarChar(200)
+  quantity    Decimal            @db.Decimal(18, 3)
+  unit        String             @db.VarChar(32)
+  remarks     String?            @db.VarChar(1000)
+
+  revision PrRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@map("pr_revision_lines")
+}
+
+model PrComment {
+  id         String   @id @default(uuid()) @db.Uuid
+  prId       String   @map("pr_id") @db.Uuid
+  revisionId String?  @map("revision_id") @db.Uuid
+  authorId   String   @map("author_id") @db.Uuid
+  body       String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  pr PurchaseRequest @relation(fields: [prId], references: [id], onDelete: Cascade)
+
+  @@index([prId, createdAt])
+  @@map("pr_comments")
+}
+
+enum PurchasingEntityType {
+  PR
+  RFQ
+  QUOTATION
+  PURCHASE_ORDER
+  DELIVERY_NOTE
+  GOODS_RECEIPT
+  VARIANCE
+  INVOICE
+}
+
+/// Pièces jointes achats (PDF devis, scans BL, preuves de réception, factures…)
+model PurchasingAttachment {
+  id           String               @id @default(uuid()) @db.Uuid
+  entityType   PurchasingEntityType @map("entity_type")
+  entityId     String               @map("entity_id") @db.Uuid
+  vesselId     String               @map("vessel_id") @db.Uuid
+  fileId       String               @unique @map("file_id") @db.Uuid
+  title        String?              @db.VarChar(200)
+  uploadedById String               @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([entityType, entityId])
+  @@map("purchasing_attachments")
+}
+
+enum RfqStatus {
+  DRAFT
+  ISSUED
+  QUOTED
+  EVALUATED
+  CLOSED
+  CANCELLED
+}
+
+model Rfq {
+  id            String    @id @default(uuid()) @db.Uuid
+  number        String    @unique @db.VarChar(40)
+  vesselId      String    @map("vessel_id") @db.Uuid
+  title         String    @db.VarChar(300)
+  status        RfqStatus @default(DRAFT)
+  deadline      DateTime? @db.Timestamptz(3)
+  deliveryPort  String?   @map("delivery_port") @db.VarChar(120)
+  deliveryTerms String?   @map("delivery_terms") @db.VarChar(500)
+  notes         String?
+  issuedAt      DateTime? @map("issued_at") @db.Timestamptz(3)
+  createdById   String    @map("created_by_id") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel     Vessel        @relation(fields: [vesselId], references: [id])
+  lines      RfqLine[]
+  suppliers  RfqSupplier[]
+  quotations Quotation[]
+
+  @@index([vesselId, status])
+  @@map("rfqs")
+}
+
+model RfqLine {
+  id          String  @id @default(uuid()) @db.Uuid
+  rfqId       String  @map("rfq_id") @db.Uuid
+  prLineId    String? @map("pr_line_id") @db.Uuid
+  lineNo      Int     @map("line_no")
+  designation String  @db.VarChar(500)
+  reference   String? @db.VarChar(200)
+  quantity    Decimal @db.Decimal(18, 3)
+  unit        String  @db.VarChar(32)
+  remarks     String? @db.VarChar(1000)
+
+  rfq            Rfq             @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  prLine         PrLine?         @relation(fields: [prLineId], references: [id])
+  quotationLines QuotationLine[]
+
+  @@unique([rfqId, lineNo])
+  @@map("rfq_lines")
+}
+
+enum RfqSupplierStatus {
+  PENDING
+  SENT
+  SEND_FAILED
+  DECLINED
+  QUOTED
+}
+
+model RfqSupplier {
+  id         String            @id @default(uuid()) @db.Uuid
+  rfqId      String            @map("rfq_id") @db.Uuid
+  supplierId String            @map("supplier_id") @db.Uuid
+  status     RfqSupplierStatus @default(PENDING)
+  sentTo     String?           @map("sent_to") @db.VarChar(320)
+  sentAt     DateTime?         @map("sent_at") @db.Timestamptz(3)
+  sendError  String?           @map("send_error") @db.VarChar(1000)
+
+  rfq      Rfq      @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  supplier Supplier @relation(fields: [supplierId], references: [id])
+
+  @@unique([rfqId, supplierId])
+  @@map("rfq_suppliers")
+}
+
+enum QuotationStatus {
+  RECEIVED
+  SELECTED
+  PARTIALLY_SELECTED
+  NOT_SELECTED
+  WITHDRAWN
+}
+
+/// Devis fournisseur — jamais écrasé (le PDF original est conservé)
+model Quotation {
+  id             String          @id @default(uuid()) @db.Uuid
+  rfqId          String          @map("rfq_id") @db.Uuid
+  supplierId     String          @map("supplier_id") @db.Uuid
+  reference      String?         @db.VarChar(120)
+  receivedAt     DateTime        @default(now()) @map("received_at") @db.Timestamptz(3)
+  currency       String          @db.Char(3)
+  validUntil     DateTime?       @map("valid_until") @db.Date
+  leadTimeDays   Int?            @map("lead_time_days")
+  incoterm       String?         @db.VarChar(16)
+  deliveryTerms  String?         @map("delivery_terms") @db.VarChar(500)
+  paymentTerms   String?         @map("payment_terms") @db.VarChar(250)
+  freightAmount  Decimal?        @map("freight_amount") @db.Decimal(18, 2)
+  taxAmount      Decimal?        @map("tax_amount") @db.Decimal(18, 2)
+  discountAmount Decimal?        @map("discount_amount") @db.Decimal(18, 2)
+  subtotal       Decimal         @default(0) @db.Decimal(18, 2)
+  totalAmount    Decimal         @default(0) @map("total_amount") @db.Decimal(18, 2)
+  comments       String?
+  fileId         String?         @unique @map("file_id") @db.Uuid
+  status         QuotationStatus @default(RECEIVED)
+  evaluationNote String?         @map("evaluation_note")
+  createdById    String          @map("created_by_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  rfq      Rfq             @relation(fields: [rfqId], references: [id])
+  supplier Supplier        @relation(fields: [supplierId], references: [id])
+  lines    QuotationLine[]
+  orders   PurchaseOrder[]
+
+  @@index([rfqId])
+  @@map("quotations")
+}
+
+enum ComplianceStatus {
+  COMPLIANT
+  ALTERNATIVE
+  NON_COMPLIANT
+}
+
+model QuotationLine {
+  id              String           @id @default(uuid()) @db.Uuid
+  quotationId     String           @map("quotation_id") @db.Uuid
+  rfqLineId       String           @map("rfq_line_id") @db.Uuid
+  isAvailable     Boolean          @default(true) @map("is_available")
+  quantityOffered Decimal?         @map("quantity_offered") @db.Decimal(18, 3)
+  unit            String?          @db.VarChar(32)
+  unitPrice       Decimal?         @map("unit_price") @db.Decimal(18, 4)
+  lineTotal       Decimal?         @map("line_total") @db.Decimal(18, 2)
+  leadTimeDays    Int?             @map("lead_time_days")
+  compliance      ComplianceStatus @default(COMPLIANT)
+  remarks         String?          @db.VarChar(1000)
+
+  quotation  Quotation           @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  rfqLine    RfqLine             @relation(fields: [rfqLineId], references: [id])
+  selections QuotationSelection[]
+
+  @@unique([quotationId, rfqLineId])
+  @@map("quotation_lines")
+}
+
+/// Sélection fournisseur SÉPARÉE de la saisie du devis (CHOIX RECOMMANDÉ RETENU §6.5)
+model QuotationSelection {
+  id              String    @id @default(uuid()) @db.Uuid
+  quotationLineId String    @map("quotation_line_id") @db.Uuid
+  quantity        Decimal   @db.Decimal(18, 3)
+  justification   String?
+  selectedById    String    @map("selected_by_id") @db.Uuid
+  selectedAt      DateTime  @default(now()) @map("selected_at") @db.Timestamptz(3)
+  withdrawnAt     DateTime? @map("withdrawn_at") @db.Timestamptz(3)
+
+  quotationLine QuotationLine @relation(fields: [quotationLineId], references: [id])
+
+  @@index([quotationLineId])
+  @@map("quotation_selections")
+}
+
+/// Seuils financiers configurables (non pré-remplis sans décision AMC)
+model ApprovalThreshold {
+  id                     String   @id @default(uuid()) @db.Uuid
+  scope                  String   @db.VarChar(40)
+  currency               String   @db.Char(3)
+  amount                 Decimal  @db.Decimal(18, 2)
+  requiresSecondApproval Boolean  @default(true) @map("requires_second_approval")
+  isActive               Boolean  @default(true) @map("is_active")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([scope, currency])
+  @@map("approval_thresholds")
+}
+
+enum PoStatus {
+  DRAFT
+  APPROVAL_PENDING
+  APPROVED
+  SENT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+/// BC = OC = Purchase Order : un seul type (CDC §16.2)
+model PurchaseOrder {
+  id                   String    @id @default(uuid()) @db.Uuid
+  number               String    @unique @db.VarChar(40)
+  vesselId             String    @map("vessel_id") @db.Uuid
+  supplierId           String    @map("supplier_id") @db.Uuid
+  quotationId          String?   @map("quotation_id") @db.Uuid
+  currency             String    @db.Char(3)
+  status               PoStatus  @default(DRAFT)
+  orderDate            DateTime  @default(now()) @map("order_date") @db.Date
+  expectedDeliveryDate DateTime? @map("expected_delivery_date") @db.Date
+  deliveryPort         String?   @map("delivery_port") @db.VarChar(120)
+  deliveryTerms        String?   @map("delivery_terms") @db.VarChar(500)
+  paymentTerms         String?   @map("payment_terms") @db.VarChar(250)
+  notes                String?
+  subtotal             Decimal   @default(0) @db.Decimal(18, 2)
+  taxAmount            Decimal   @default(0) @map("tax_amount") @db.Decimal(18, 2)
+  freightAmount        Decimal   @default(0) @map("freight_amount") @db.Decimal(18, 2)
+  totalAmount          Decimal   @default(0) @map("total_amount") @db.Decimal(18, 2)
+  revisionNo           Int       @default(0) @map("revision_no")
+  requiresSecondApproval Boolean @default(false) @map("requires_second_approval")
+  approvedById         String?   @map("approved_by_id") @db.Uuid
+  approvedAt           DateTime? @map("approved_at") @db.Timestamptz(3)
+  secondApprovedById   String?   @map("second_approved_by_id") @db.Uuid
+  secondApprovedAt     DateTime? @map("second_approved_at") @db.Timestamptz(3)
+  sentAt               DateTime? @map("sent_at") @db.Timestamptz(3)
+  sentById             String?   @map("sent_by_id") @db.Uuid
+  closedAt             DateTime? @map("closed_at") @db.Timestamptz(3)
+  cancelledAt          DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelReason         String?   @map("cancel_reason") @db.VarChar(500)
+  pdfFileId            String?   @unique @map("pdf_file_id") @db.Uuid
+  lockVersion          Int       @default(1) @map("lock_version")
+  createdById          String    @map("created_by_id") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel        Vessel         @relation(fields: [vesselId], references: [id])
+  supplier      Supplier       @relation(fields: [supplierId], references: [id])
+  quotation     Quotation?     @relation(fields: [quotationId], references: [id])
+  lines         PoLine[]
+  revisions     PoRevision[]
+  dispatches    PoDispatch[]
+  deliveryNotes DeliveryNote[]
+  receipts      GoodsReceipt[]
+  variances     Variance[]
+  invoiceLinks  InvoiceOrderLink[]
+
+  @@index([vesselId, status])
+  @@index([supplierId])
+  @@map("purchase_orders")
+}
+
+model PoLine {
+  id                String     @id @default(uuid()) @db.Uuid
+  poId              String     @map("po_id") @db.Uuid
+  lineNo            Int        @map("line_no")
+  designation       String     @db.VarChar(500)
+  reference         String?    @db.VarChar(200)
+  quantityOrdered   Decimal    @map("quantity_ordered") @db.Decimal(18, 3)
+  unit              String     @db.VarChar(32)
+  unitPrice         Decimal    @default(0) @map("unit_price") @db.Decimal(18, 4)
+  lineTotal         Decimal    @default(0) @map("line_total") @db.Decimal(18, 2)
+  quotationLineId   String?    @map("quotation_line_id") @db.Uuid
+  quantityCancelled Decimal    @default(0) @map("quantity_cancelled") @db.Decimal(18, 3)
+  status            LineStatus @default(OPEN)
+  remarks           String?    @db.VarChar(1000)
+
+  po                PurchaseOrder      @relation(fields: [poId], references: [id], onDelete: Cascade)
+  allocations       PoLineAllocation[]
+  deliveryNoteLines DeliveryNoteLine[]
+  receiptLines      ReceiptLine[]
+  variances         Variance[]
+
+  @@unique([poId, lineNo])
+  @@map("po_lines")
+}
+
+/// Liens n:m explicites PR line <-> PO line avec quantités allouées (anti-sur-allocation)
+model PoLineAllocation {
+  id        String   @id @default(uuid()) @db.Uuid
+  poLineId  String   @map("po_line_id") @db.Uuid
+  prLineId  String   @map("pr_line_id") @db.Uuid
+  quantity  Decimal  @db.Decimal(18, 3)
+  /// Dépassement explicitement autorisé (motif + permission)
+  overAllocationReason String? @map("over_allocation_reason") @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  poLine PoLine @relation(fields: [poLineId], references: [id], onDelete: Cascade)
+  prLine PrLine @relation(fields: [prLineId], references: [id])
+
+  @@unique([poLineId, prLineId])
+  @@index([prLineId])
+  @@map("po_line_allocations")
+}
+
+/// Révision / avenant BC : trace des quantités contractuelles précédentes
+model PoRevision {
+  id          String   @id @default(uuid()) @db.Uuid
+  poId        String   @map("po_id") @db.Uuid
+  revisionNo  Int      @map("revision_no")
+  snapshot    Json
+  reason      String   @db.VarChar(500)
+  pdfFileId   String?  @map("pdf_file_id") @db.Uuid
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  po PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+
+  @@unique([poId, revisionNo])
+  @@map("po_revisions")
+}
+
+enum DispatchStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// Envoi BC (fournisseur, Captain, demandeur) : jamais "envoyé" si le transport échoue
+model PoDispatch {
+  id        String         @id @default(uuid()) @db.Uuid
+  poId      String         @map("po_id") @db.Uuid
+  recipient String         @db.VarChar(320)
+  recipientKind String     @map("recipient_kind") @db.VarChar(32)
+  channel   String         @db.VarChar(16)
+  status    DispatchStatus @default(PENDING)
+  fileId    String?        @map("file_id") @db.Uuid
+  error     String?        @db.VarChar(1000)
+  sentAt    DateTime?      @map("sent_at") @db.Timestamptz(3)
+  createdById String       @map("created_by_id") @db.Uuid
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  po PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+
+  @@index([poId])
+  @@map("po_dispatches")
+}
+
+enum DeliveryNoteStatus {
+  RECORDED
+  RECEIVED
+  CANCELLED
+}
+
+/// BL (Bon de Livraison) : ce que le fournisseur déclare livrer — distinct du reçu physique
+model DeliveryNote {
+  id           String             @id @default(uuid()) @db.Uuid
+  number       String             @db.VarChar(80)
+  supplierId   String             @map("supplier_id") @db.Uuid
+  vesselId     String             @map("vessel_id") @db.Uuid
+  poId         String             @map("po_id") @db.Uuid
+  deliveryDate DateTime           @map("delivery_date") @db.Date
+  fileId       String?            @unique @map("file_id") @db.Uuid
+  status       DeliveryNoteStatus @default(RECORDED)
+  notes        String?
+  createdById  String             @map("created_by_id") @db.Uuid
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  supplier Supplier           @relation(fields: [supplierId], references: [id])
+  vessel   Vessel             @relation(fields: [vesselId], references: [id])
+  po         PurchaseOrder           @relation(fields: [poId], references: [id])
+  lines      DeliveryNoteLine[]
+  extraItems DeliveryNoteExtraItem[]
+  receipts   GoodsReceipt[]
+
+  @@unique([supplierId, number])
+  @@index([poId])
+  @@map("delivery_notes")
+}
+
+/// Article reçu à bord qui ne figure pas sur le BC (noté par le bord ; information, sans alerte ni blocage)
+model DeliveryNoteExtraItem {
+  id             String   @id @default(uuid()) @db.Uuid
+  deliveryNoteId String   @map("delivery_note_id") @db.Uuid
+  designation    String   @db.VarChar(500)
+  reference      String?  @db.VarChar(200)
+  quantity       Decimal  @db.Decimal(18, 3)
+  unit           String   @db.VarChar(32)
+  remarks        String?  @db.VarChar(1000)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  deliveryNote DeliveryNote @relation(fields: [deliveryNoteId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryNoteId])
+  @@map("delivery_note_extra_items")
+}
+
+model DeliveryNoteLine {
+  id             String  @id @default(uuid()) @db.Uuid
+  deliveryNoteId String  @map("delivery_note_id") @db.Uuid
+  poLineId       String  @map("po_line_id") @db.Uuid
+  quantityOnNote Decimal @map("quantity_on_note") @db.Decimal(18, 3)
+  unit           String  @db.VarChar(32)
+
+  deliveryNote DeliveryNote  @relation(fields: [deliveryNoteId], references: [id], onDelete: Cascade)
+  poLine       PoLine        @relation(fields: [poLineId], references: [id])
+  receiptLines ReceiptLine[]
+
+  @@unique([deliveryNoteId, poLineId])
+  @@map("delivery_note_lines")
+}
+
+enum ReceiptStatus {
+  DRAFT
+  CONFIRMED
+  VALIDATED
+}
+
+/// Réception physique à bord. idempotency_key UNIQUE => pas de double comptage (PUR-05)
+model GoodsReceipt {
+  id              String        @id @default(uuid()) @db.Uuid
+  number          String        @unique @db.VarChar(40)
+  vesselId        String        @map("vessel_id") @db.Uuid
+  poId            String        @map("po_id") @db.Uuid
+  deliveryNoteId  String?       @map("delivery_note_id") @db.Uuid
+  receivedAt      DateTime      @map("received_at") @db.Timestamptz(3)
+  receivedById    String        @map("received_by_id") @db.Uuid
+  responsibleName String?       @map("responsible_name") @db.VarChar(200)
+  status          ReceiptStatus @default(CONFIRMED)
+  validatedById   String?       @map("validated_by_id") @db.Uuid
+  validatedAt     DateTime?     @map("validated_at") @db.Timestamptz(3)
+  notes           String?
+  idempotencyKey  String        @unique @map("idempotency_key") @db.VarChar(128)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  vessel       Vessel        @relation(fields: [vesselId], references: [id])
+  po           PurchaseOrder @relation(fields: [poId], references: [id])
+  deliveryNote DeliveryNote? @relation(fields: [deliveryNoteId], references: [id])
+  lines        ReceiptLine[]
+  variances    Variance[]
+
+  @@index([poId])
+  @@map("goods_receipts")
+}
+
+enum ItemCondition {
+  GOOD
+  DAMAGED
+  WRONG_ITEM
+}
+
+model ReceiptLine {
+  id                 String        @id @default(uuid()) @db.Uuid
+  receiptId          String        @map("receipt_id") @db.Uuid
+  poLineId           String        @map("po_line_id") @db.Uuid
+  deliveryNoteLineId String?       @map("delivery_note_line_id") @db.Uuid
+  qtyReceived        Decimal       @map("qty_received") @db.Decimal(18, 3)
+  qtyAccepted        Decimal       @map("qty_accepted") @db.Decimal(18, 3)
+  qtyRejected        Decimal       @default(0) @map("qty_rejected") @db.Decimal(18, 3)
+  condition          ItemCondition @default(GOOD)
+  remarks            String?       @db.VarChar(1000)
+
+  receipt          GoodsReceipt      @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  poLine           PoLine            @relation(fields: [poLineId], references: [id])
+  deliveryNoteLine DeliveryNoteLine? @relation(fields: [deliveryNoteLineId], references: [id])
+
+  @@unique([receiptId, poLineId])
+  @@map("receipt_lines")
+}
+
+enum VarianceType {
+  SHORT_SHIPPED
+  SHORT_RECEIVED
+  SURPLUS
+  DAMAGED
+  WRONG_REFERENCE
+  REJECTED
+}
+
+enum VarianceStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+/// Rapport d'écart (manquant, surplus, avarie, mauvaise référence…)
+model Variance {
+  id           String         @id @default(uuid()) @db.Uuid
+  poId         String         @map("po_id") @db.Uuid
+  poLineId     String         @map("po_line_id") @db.Uuid
+  receiptId    String?        @map("receipt_id") @db.Uuid
+  type         VarianceType
+  quantity     Decimal        @db.Decimal(18, 3)
+  description  String?
+  status       VarianceStatus @default(OPEN)
+  assignedToId String?        @map("assigned_to_id") @db.Uuid
+  resolution   String?
+  resolvedAt   DateTime?      @map("resolved_at") @db.Timestamptz(3)
+  createdById  String         @map("created_by_id") @db.Uuid
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  po      PurchaseOrder @relation(fields: [poId], references: [id])
+  poLine  PoLine        @relation(fields: [poLineId], references: [id])
+  receipt GoodsReceipt? @relation(fields: [receiptId], references: [id])
+
+  @@index([poId, status])
+  @@map("variances")
+}
+
+enum InvoiceStatus {
+  RECEIVED
+  UNDER_REVIEW
+  MATCHED
+  DISPUTED
+  APPROVED
+  CANCELLED
+}
+
+/// Facture fournisseur : n'affecte jamais le statut de réception (PUR-07) ; paiement hors V1
+model Invoice {
+  id          String        @id @default(uuid()) @db.Uuid
+  supplierId  String        @map("supplier_id") @db.Uuid
+  vesselId    String?       @map("vessel_id") @db.Uuid
+  number      String        @db.VarChar(80)
+  invoiceDate DateTime      @map("invoice_date") @db.Date
+  dueDate     DateTime?     @map("due_date") @db.Date
+  currency    String        @db.Char(3)
+  amount      Decimal       @db.Decimal(18, 2)
+  taxAmount   Decimal       @default(0) @map("tax_amount") @db.Decimal(18, 2)
+  fileId      String?       @unique @map("file_id") @db.Uuid
+  status      InvoiceStatus @default(RECEIVED)
+  reviewNotes String?       @map("review_notes")
+  createdById String        @map("created_by_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  supplier Supplier           @relation(fields: [supplierId], references: [id])
+  orders   InvoiceOrderLink[]
+
+  @@unique([supplierId, number])
+  @@map("invoices")
+}
+
+model InvoiceOrderLink {
+  invoiceId String  @map("invoice_id") @db.Uuid
+  poId      String  @map("po_id") @db.Uuid
+  amount    Decimal? @db.Decimal(18, 2)
+
+  invoice Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  po      PurchaseOrder @relation(fields: [poId], references: [id])
+
+  @@id([invoiceId, poId])
+  @@map("invoice_order_links")
+}
+
+// =============================================================================
+// VOYAGES — voyages, escales, cargaisons, Charter Party, instructions, notices
+// =============================================================================
+
+enum VoyageStatus {
+  DRAFT
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Voyage {
+  id             String       @id @default(uuid()) @db.Uuid
+  reference      String       @unique @db.VarChar(40)
+  vesselId       String       @map("vessel_id") @db.Uuid
+  status         VoyageStatus @default(DRAFT)
+  charterer      String?      @db.VarChar(200)
+  broker         String?      @db.VarChar(200)
+  /// Rattachement principal à une CP (obligatoire hors DRAFT lorsqu'elle existe)
+  charterPartyId String?      @map("charter_party_id") @db.Uuid
+  description    String?
+  laycanFrom     DateTime?    @map("laycan_from") @db.Date
+  laycanTo       DateTime?    @map("laycan_to") @db.Date
+  etd            DateTime?    @db.Timestamptz(3)
+  eta            DateTime?    @db.Timestamptz(3)
+  atd            DateTime?    @db.Timestamptz(3)
+  ata            DateTime?    @db.Timestamptz(3)
+  notes          String?
+  closedAt       DateTime?    @map("closed_at") @db.Timestamptz(3)
+  lockVersion    Int          @default(1) @map("lock_version")
+  createdById    String       @map("created_by_id") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel          Vessel              @relation(fields: [vesselId], references: [id])
+  charterParty    CharterParty?       @relation(fields: [charterPartyId], references: [id])
+  ports           VoyagePort[]
+  agents          VoyageAgent[]
+  cargos          Cargo[]
+  instructions    VoyageInstruction[]
+  tasks           VoyageTask[]
+  notices         VoyageNotice[]
+  norRecords      NorRecord[]
+  files           VoyageFile[]
+  noonReports     NoonReport[]
+  crewAssignments CrewAssignment[]
+
+  @@index([vesselId, status])
+  @@map("voyages")
+}
+
+model VoyageAgent {
+  id       String  @id @default(uuid()) @db.Uuid
+  voyageId String  @map("voyage_id") @db.Uuid
+  role     String  @db.VarChar(40)
+  name     String  @db.VarChar(200)
+  city     String? @db.VarChar(120)
+  email    String? @db.VarChar(320)
+  phone    String? @db.VarChar(64)
+  address  String? @db.VarChar(500)
+  notes    String?
+
+  voyage Voyage       @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  ports  VoyagePort[]
+
+  @@index([voyageId])
+  @@map("voyage_agents")
+}
+
+enum PortCallType {
+  LOAD
+  DISCHARGE
+  INTERMEDIATE
+  BUNKERING
+}
+
+model VoyagePort {
+  id              String       @id @default(uuid()) @db.Uuid
+  voyageId        String       @map("voyage_id") @db.Uuid
+  sequence        Int
+  type            PortCallType
+  portName        String       @map("port_name") @db.VarChar(120)
+  country         String?      @db.VarChar(2)
+  unlocode        String?      @db.VarChar(5)
+  berth           String?      @db.VarChar(120)
+  agentId         String?      @map("agent_id") @db.Uuid
+  eta             DateTime?    @db.Timestamptz(3)
+  ata             DateTime?    @db.Timestamptz(3)
+  etd             DateTime?    @db.Timestamptz(3)
+  atd             DateTime?    @db.Timestamptz(3)
+  cargoOperations String?      @map("cargo_operations")
+  notes           String?
+
+  voyage  Voyage         @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  agent   VoyageAgent?   @relation(fields: [agentId], references: [id])
+  tasks   VoyageTask[]
+  notices VoyageNotice[]
+  nors    NorRecord[]
+
+  @@unique([voyageId, sequence])
+  @@map("voyage_ports")
+}
+
+model Cargo {
+  id                String   @id @default(uuid()) @db.Uuid
+  voyageId          String   @map("voyage_id") @db.Uuid
+  commodity         String   @db.VarChar(200)
+  description       String?
+  qtyMinMt          Decimal? @map("qty_min_mt") @db.Decimal(14, 3)
+  qtyMaxMt          Decimal? @map("qty_max_mt") @db.Decimal(14, 3)
+  qtyActualMt       Decimal? @map("qty_actual_mt") @db.Decimal(14, 3)
+  unit              String   @default("MT") @db.VarChar(16)
+  /// Ex. "owners option"
+  quantityOption    String?  @map("quantity_option") @db.VarChar(120)
+  stowageFactor     Decimal? @map("stowage_factor") @db.Decimal(10, 3)
+  stowageFactorUnit String?  @map("stowage_factor_unit") @db.VarChar(32)
+  isDangerous       Boolean  @default(false) @map("is_dangerous")
+  documentation     String?
+  notes             String?
+
+  voyage Voyage @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+
+  @@index([voyageId])
+  @@map("cargos")
+}
+
+enum CharterPartyType {
+  VOYAGE
+  TIME
+  BAREBOAT
+  COA
+  OTHER
+}
+
+enum CpStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SUPERSEDED
+  CANCELLED
+}
+
+/// Charter Party : clauses stockées en texte contrôlé, jamais interprétées automatiquement
+model CharterParty {
+  id               String           @id @default(uuid()) @db.Uuid
+  reference        String           @unique @db.VarChar(80)
+  cpType           CharterPartyType @map("cp_type")
+  cpDate           DateTime?        @map("cp_date") @db.Date
+  vesselId         String?          @map("vessel_id") @db.Uuid
+  charterer        String?          @db.VarChar(200)
+  owner            String?          @db.VarChar(200)
+  broker           String?          @db.VarChar(200)
+  signatories      String?          @db.VarChar(500)
+  laycanFrom       DateTime?        @map("laycan_from") @db.Date
+  laycanTo         DateTime?        @map("laycan_to") @db.Date
+  loadPorts        String?          @map("load_ports") @db.VarChar(500)
+  dischargePorts   String?          @map("discharge_ports") @db.VarChar(500)
+  cargoDescription String?          @map("cargo_description")
+  norClause        String?          @map("nor_clause")
+  laytimeClause    String?          @map("laytime_clause")
+  /// Uniquement si explicitement renseigné (ne jamais inventer)
+  freightTerms     String?          @map("freight_terms")
+  demurrageTerms   String?          @map("demurrage_terms")
+  otherClauses     String?          @map("other_clauses")
+  status           CpStatus         @default(DRAFT)
+  currentVersionId String?          @unique @map("current_version_id") @db.Uuid
+  createdById      String           @map("created_by_id") @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel         Vessel?     @relation(fields: [vesselId], references: [id])
+  currentVersion CpVersion?  @relation("CpCurrentVersion", fields: [currentVersionId], references: [id])
+  versions       CpVersion[] @relation("CpVersions")
+  voyages        Voyage[]
+
+  @@map("charter_parties")
+}
+
+enum CpVersionKind {
+  ORIGINAL
+  ADDENDUM
+  REVISION
+}
+
+model CpVersion {
+  id              String         @id @default(uuid()) @db.Uuid
+  charterPartyId  String         @map("charter_party_id") @db.Uuid
+  versionNo       Int            @map("version_no")
+  kind            CpVersionKind  @default(ORIGINAL)
+  fileId          String?        @unique @map("file_id") @db.Uuid
+  summary         String?
+  /// Snapshot des clauses structurées de cette version
+  clauses         Json?
+  status          ApprovalStatus @default(PENDING_APPROVAL)
+  submittedById   String         @map("submitted_by_id") @db.Uuid
+  submittedAt     DateTime       @default(now()) @map("submitted_at") @db.Timestamptz(3)
+  decidedById     String?        @map("decided_by_id") @db.Uuid
+  decidedAt       DateTime?      @map("decided_at") @db.Timestamptz(3)
+  decisionComment String?        @map("decision_comment")
+  supersededAt    DateTime?      @map("superseded_at") @db.Timestamptz(3)
+
+  charterParty    CharterParty        @relation("CpVersions", fields: [charterPartyId], references: [id])
+  currentOf       CharterParty?       @relation("CpCurrentVersion")
+  acknowledgements CpAcknowledgement[]
+
+  @@unique([charterPartyId, versionNo])
+  @@map("cp_versions")
+}
+
+/// Accusés de lecture du Master
+model CpAcknowledgement {
+  id             String   @id @default(uuid()) @db.Uuid
+  cpVersionId    String   @map("cp_version_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  acknowledgedAt DateTime @default(now()) @map("acknowledged_at") @db.Timestamptz(3)
+
+  cpVersion CpVersion @relation(fields: [cpVersionId], references: [id])
+
+  @@unique([cpVersionId, userId])
+  @@map("cp_acknowledgements")
+}
+
+enum InstructionStatus {
+  DRAFT
+  ISSUED
+  SUPERSEDED
+}
+
+model VoyageInstruction {
+  id          String            @id @default(uuid()) @db.Uuid
+  voyageId    String            @map("voyage_id") @db.Uuid
+  versionNo   Int               @map("version_no")
+  title       String            @db.VarChar(300)
+  fileId      String?           @unique @map("file_id") @db.Uuid
+  /// Champs structurés (notices, compliance checks, checklist Master…)
+  fields      Json?
+  notices     String?
+  status      InstructionStatus @default(DRAFT)
+  issuedById  String?           @map("issued_by_id") @db.Uuid
+  issuedAt    DateTime?         @map("issued_at") @db.Timestamptz(3)
+  createdById String            @map("created_by_id") @db.Uuid
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  voyage Voyage                 @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  acks   VoyageInstructionAck[]
+
+  @@unique([voyageId, versionNo])
+  @@map("voyage_instructions")
+}
+
+model VoyageInstructionAck {
+  id            String   @id @default(uuid()) @db.Uuid
+  instructionId String   @map("instruction_id") @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  ackAt         DateTime @default(now()) @map("ack_at") @db.Timestamptz(3)
+
+  instruction VoyageInstruction @relation(fields: [instructionId], references: [id], onDelete: Cascade)
+
+  @@unique([instructionId, userId])
+  @@map("voyage_instruction_acks")
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+/// Checklist / tâches par escale (Master checklist, surveys, documents…)
+model VoyageTask {
+  id             String     @id @default(uuid()) @db.Uuid
+  voyageId       String     @map("voyage_id") @db.Uuid
+  portId         String?    @map("port_id") @db.Uuid
+  title          String     @db.VarChar(300)
+  description    String?
+  category       String     @default("CHECKLIST") @db.VarChar(40)
+  assigneeId     String?    @map("assignee_id") @db.Uuid
+  dueAt          DateTime?  @map("due_at") @db.Timestamptz(3)
+  status         TaskStatus @default(OPEN)
+  completedAt    DateTime?  @map("completed_at") @db.Timestamptz(3)
+  completedById  String?    @map("completed_by_id") @db.Uuid
+  evidenceFileId String?    @unique @map("evidence_file_id") @db.Uuid
+  comment        String?
+  sortOrder      Int        @default(0) @map("sort_order")
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  voyage Voyage      @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  port   VoyagePort? @relation(fields: [portId], references: [id])
+
+  @@index([voyageId, status])
+  @@map("voyage_tasks")
+}
+
+enum NoticeStatus {
+  PLANNED
+  DRAFTED
+  VALIDATED
+  SENT
+  CANCELLED
+}
+
+/// Notices d'arrivée : brouillon + validation humaine, jamais d'envoi externe automatique
+model VoyageNotice {
+  id            String       @id @default(uuid()) @db.Uuid
+  voyageId      String       @map("voyage_id") @db.Uuid
+  portId        String?      @map("port_id") @db.Uuid
+  kind          String       @db.VarChar(40)
+  scheduleLabel String?      @map("schedule_label") @db.VarChar(120)
+  dueAt         DateTime?    @map("due_at") @db.Timestamptz(3)
+  recipients    String?      @db.VarChar(1000)
+  draftBody     String?      @map("draft_body")
+  status        NoticeStatus @default(PLANNED)
+  validatedById String?      @map("validated_by_id") @db.Uuid
+  validatedAt   DateTime?    @map("validated_at") @db.Timestamptz(3)
+  sentAt        DateTime?    @map("sent_at") @db.Timestamptz(3)
+  sentById      String?      @map("sent_by_id") @db.Uuid
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  voyage Voyage      @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  port   VoyagePort? @relation(fields: [portId], references: [id])
+
+  @@index([voyageId, status, dueAt])
+  @@map("voyage_notices")
+}
+
+model NorRecord {
+  id          String    @id @default(uuid()) @db.Uuid
+  voyageId    String    @map("voyage_id") @db.Uuid
+  portId      String    @map("port_id") @db.Uuid
+  tenderedAt  DateTime  @map("tendered_at") @db.Timestamptz(3)
+  acceptedAt  DateTime? @map("accepted_at") @db.Timestamptz(3)
+  acceptedBy  String?   @map("accepted_by") @db.VarChar(200)
+  remarks     String?
+  fileId      String?   @unique @map("file_id") @db.Uuid
+  createdById String    @map("created_by_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  voyage Voyage     @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+  port   VoyagePort @relation(fields: [portId], references: [id])
+
+  @@index([voyageId])
+  @@map("nor_records")
+}
+
+model VoyageFile {
+  id           String    @id @default(uuid()) @db.Uuid
+  voyageId     String    @map("voyage_id") @db.Uuid
+  fileId       String    @unique @map("file_id") @db.Uuid
+  category     String    @db.VarChar(60)
+  title        String    @db.VarChar(200)
+  uploadedById String    @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// Archivage logique (jamais de suppression) — migration 0050
+  archivedAt   DateTime? @map("archived_at") @db.Timestamptz(3)
+  archivedById String?   @map("archived_by_id") @db.Uuid
+
+  voyage Voyage @relation(fields: [voyageId], references: [id], onDelete: Cascade)
+
+  @@index([voyageId])
+  @@map("voyage_files")
+}
+
+// =============================================================================
+// NOON REPORTS — formulaire AMC en 7 sections (CDC §8)
+// =============================================================================
+
+enum NoonReportType {
+  NOON
+  MIDNIGHT
+  ARRIVAL
+  DEPARTURE
+}
+
+enum NoonStatus {
+  DRAFT
+  SUBMITTED
+  ACKNOWLEDGED
+  CORRECTION_REQUESTED
+  CORRECTED
+  ARCHIVED
+}
+
+enum ConsumptionBasis {
+  SINCE_LAST_REPORT
+  DAILY_24H
+}
+
+enum LoadingCondition {
+  LADEN
+  BALLAST
+  PART_LADEN
+  LOADING
+  DISCHARGING
+}
+
+/// Valeurs de travail (brouillon) ; chaque soumission/correction est figée dans noon_report_revisions
+model NoonReport {
+  id                  String            @id @default(uuid()) @db.Uuid
+  vesselId            String            @map("vessel_id") @db.Uuid
+  voyageId            String            @map("voyage_id") @db.Uuid
+  // 1. General Information
+  reportType          NoonReportType    @default(NOON) @map("report_type")
+  reportDateUtc       DateTime          @map("report_date_utc") @db.Timestamptz(3)
+  /// Décalage local -> UTC en minutes (ex. +60) pour l'affichage de l'heure locale
+  utcOffsetMinutes    Int               @default(0) @map("utc_offset_minutes")
+  reference           String?           @db.VarChar(80)
+  masterName          String?           @map("master_name") @db.VarChar(200)
+  // 2. Position & Weather
+  latitude            Decimal?          @db.Decimal(9, 6)
+  longitude           Decimal?          @db.Decimal(9, 6)
+  windDirection       String?           @map("wind_direction") @db.VarChar(16)
+  windForceBeaufort   Int?              @map("wind_force_beaufort")
+  windSpeedKnots      Decimal?          @map("wind_speed_knots") @db.Decimal(5, 1)
+  weatherConditions   String?           @map("weather_conditions") @db.VarChar(200)
+  seaState            String?           @map("sea_state") @db.VarChar(60)
+  swellDirection      String?           @map("swell_direction") @db.VarChar(16)
+  swellHeightM        Decimal?          @map("swell_height_m") @db.Decimal(4, 1)
+  visibility          String?           @db.VarChar(60)
+  // 3. Navigation & Course
+  courseDeg           Decimal?          @map("course_deg") @db.Decimal(5, 1)
+  speedKnots          Decimal?          @map("speed_knots") @db.Decimal(5, 2)
+  distanceSinceLastNm Decimal?          @map("distance_since_last_nm") @db.Decimal(8, 2)
+  distanceRemainingNm Decimal?          @map("distance_remaining_nm") @db.Decimal(8, 2)
+  nextPort            String?           @map("next_port") @db.VarChar(120)
+  etaNextPort         DateTime?         @map("eta_next_port") @db.Timestamptz(3)
+  // 4. Engine & Fuel
+  consumptionBasis    ConsumptionBasis  @default(SINCE_LAST_REPORT) @map("consumption_basis")
+  meRpm               Decimal?          @map("me_rpm") @db.Decimal(6, 1)
+  foConsumptionMt     Decimal?          @map("fo_consumption_mt") @db.Decimal(10, 3)
+  doConsumptionMt     Decimal?          @map("do_consumption_mt") @db.Decimal(10, 3)
+  lubeOilConsumptionL Decimal?          @map("lube_oil_consumption_l") @db.Decimal(10, 2)
+  runningHours        Decimal?          @map("running_hours") @db.Decimal(5, 2)
+  foRobMt             Decimal?          @map("fo_rob_mt") @db.Decimal(10, 3)
+  doRobMt             Decimal?          @map("do_rob_mt") @db.Decimal(10, 3)
+  loRobL              Decimal?          @map("lo_rob_l") @db.Decimal(10, 2)
+  // 5. Ballast & Cargo
+  ballastWaterM3      Decimal?          @map("ballast_water_m3") @db.Decimal(10, 2)
+  loadingCondition    LoadingCondition? @map("loading_condition")
+  cargoType           String?           @map("cargo_type") @db.VarChar(200)
+  cargoQuantityMt     Decimal?          @map("cargo_quantity_mt") @db.Decimal(14, 3)
+  // 6. Incidents & Remarks
+  incidents           String?
+  remarks             String?
+  // 7. Maintenance & Observations
+  maintenanceDone     String?           @map("maintenance_done")
+  maintenancePlanned  String?           @map("maintenance_planned")
+  deviations          String?
+  additionalNotes     String?           @map("additional_notes")
+  // Cycle
+  status              NoonStatus        @default(DRAFT)
+  currentRevisionNo   Int               @default(0) @map("current_revision_no")
+  submittedById       String?           @map("submitted_by_id") @db.Uuid
+  submittedAt         DateTime?         @map("submitted_at") @db.Timestamptz(3)
+  acknowledgedById    String?           @map("acknowledged_by_id") @db.Uuid
+  acknowledgedAt      DateTime?         @map("acknowledged_at") @db.Timestamptz(3)
+  correctionRequest   String?           @map("correction_request")
+  lockVersion         Int               @default(1) @map("lock_version")
+  createdById         String            @map("created_by_id") @db.Uuid
+  createdAt           DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  vessel      Vessel                @relation(fields: [vesselId], references: [id])
+  voyage      Voyage                @relation(fields: [voyageId], references: [id])
+  revisions   NoonReportRevision[]
+  attachments NoonReportAttachment[]
+
+  @@unique([voyageId, reportType, reportDateUtc])
+  @@index([vesselId, reportDateUtc(sort: Desc)])
+  @@map("noon_reports")
+}
+
+/// Snapshot figé de chaque soumission / correction (audit old/new)
+model NoonReportRevision {
+  id           String   @id @default(uuid()) @db.Uuid
+  noonReportId String   @map("noon_report_id") @db.Uuid
+  revisionNo   Int      @map("revision_no")
+  data         Json
+  reason       String?  @db.VarChar(1000)
+  pdfFileId    String?  @unique @map("pdf_file_id") @db.Uuid
+  createdById  String   @map("created_by_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  noonReport NoonReport @relation(fields: [noonReportId], references: [id])
+
+  @@unique([noonReportId, revisionNo])
+  @@map("noon_report_revisions")
+}
+
+model NoonReportAttachment {
+  id           String   @id @default(uuid()) @db.Uuid
+  noonReportId String   @map("noon_report_id") @db.Uuid
+  fileId       String   @unique @map("file_id") @db.Uuid
+  uploadedById String   @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  noonReport NoonReport @relation(fields: [noonReportId], references: [id])
+
+  @@index([noonReportId])
+  @@map("noon_report_attachments")
+}

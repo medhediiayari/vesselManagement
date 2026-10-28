@@ -1,0 +1,174 @@
+# AMC Platform — infrastructure locale (dev / staging-like)
+# Usage : npm run infra:up    (depuis la racine, avec .env)
+name: amc
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: amc_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-amc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-amc_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-amc}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - amc_pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-amc} -d ${POSTGRES_DB:-amc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    container_name: amc_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-amc_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-amc_minio_dev_password}
+      # Aucune URL publique : les buckets restent privés (pas de policy anonyme)
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_PORT:-9101}
+    ports:
+      - "${MINIO_API_PORT:-9100}:9000"
+      - "${MINIO_CONSOLE_PORT:-9101}:9001"
+    volumes:
+      - amc_minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Initialisation idempotente des buckets privés + règles de cycle de vie
+  minio-init:
+    image: minio/mc:latest
+    container_name: amc_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-amc_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-amc_minio_dev_password}
+      S3_BUCKET_FILES: ${S3_BUCKET_FILES:-amc-files}
+      S3_BUCKET_QUARANTINE: ${S3_BUCKET_QUARANTINE:-amc-quarantine}
+      S3_BUCKET_EXPORTS: ${S3_BUCKET_EXPORTS:-amc-exports}
+    volumes:
+      - ./minio/init-buckets.sh:/init-buckets.sh:ro
+    entrypoint: ["/bin/sh", "/init-buckets.sh"]
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    container_name: amc_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - amc_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Capture des e-mails en développement (aucun envoi externe réel)
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: amc_mailpit
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+
+  # Antivirus optionnel : npm run infra:av  puis AV_MODE=clamav
+  clamav:
+    image: clamav/clamav:stable
+    container_name: amc_clamav
+    profiles: ["antivirus", "app"]
+    restart: unless-stopped
+    ports:
+      - "${CLAMAV_PORT:-3310}:3310"
+
+  # ---------------------------------------------------------------------------
+  # Plateforme conteneurisée (staging-like) : npm run app:up
+  # ---------------------------------------------------------------------------
+  migrate:
+    profiles: ["app"]
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    image: amc-api:local
+    container_name: amc_migrate
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-amc}:${POSTGRES_PASSWORD:-amc_dev_password}@postgres:5432/${POSTGRES_DB:-amc}?schema=public
+    command: ["npx", "prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
+    restart: "no"
+
+  api:
+    profiles: ["app"]
+    image: amc-api:local
+    container_name: amc_api
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      API_PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-amc}:${POSTGRES_PASSWORD:-amc_dev_password}@postgres:5432/${POSTGRES_DB:-amc}?schema=public
+      S3_ENDPOINT: http://minio:9000
+      # URL signées pour le navigateur : endpoint public de MinIO (reverse proxy TLS en production)
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9100}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-amc_minio}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-amc_minio_dev_password}
+      S3_FORCE_PATH_STYLE: "true"
+      S3_BUCKET_FILES: ${S3_BUCKET_FILES:-amc-files}
+      S3_BUCKET_QUARANTINE: ${S3_BUCKET_QUARANTINE:-amc-quarantine}
+      S3_BUCKET_EXPORTS: ${S3_BUCKET_EXPORTS:-amc-exports}
+      FILE_DELIVERY_MODE: ${FILE_DELIVERY_MODE:-presigned}
+      AV_MODE: ${APP_AV_MODE:-clamav}
+      CLAMAV_HOST: clamav
+      REDIS_URL: redis://redis:6379
+      EMAIL_MODE: ${EMAIL_MODE:-smtp}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      WEB_ORIGIN: ${APP_BASE_URL:-http://localhost:3100}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3100}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ports:
+      - "${APP_API_PORT:-4010}:4000"
+    restart: unless-stopped
+
+  web:
+    profiles: ["app"]
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args: { API_INTERNAL_URL: http://api:4000 }
+    image: amc-web:local
+    container_name: amc_web
+    depends_on: [api]
+    ports:
+      - "${APP_WEB_PORT:-3110}:3100"
+    restart: unless-stopped
+
+networks:
+  default:
+    name: amc_network
+    ipam:
+      config:
+        # Sous-réseau explicite : les pools Docker par défaut peuvent être saturés
+        - subnet: 10.88.0.0/24
+
+volumes:
+  amc_pgdata:
+  amc_minio:
+  amc_redis:
