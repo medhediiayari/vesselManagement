@@ -21,6 +21,7 @@ import { CpVersionDialog } from '@/components/voyages/cp-version-dialog';
 import { CP_CLAUSE_FIELDS, CP_CONTRACT_FIELDS, type AcknowledgementList, type CpDetail, type CpVersionRow } from '@/components/voyages/types';
 import { CP_FIELD_LABELS, CP_TYPE_LABELS, CP_VERSION_KIND_LABELS, cpKeys, fmtLaycan, notifyError } from '@/components/voyages/lib';
 import { CpStatusBadge, CpVersionStatusBadge, VoyageStatusBadge } from '@/components/voyages/status';
+import { CreatedBy, createdBySentence } from '@/components/amc/created-by';
 
 function clauseValue(field: string, v: string | null | undefined): string {
   if (!v) return '—';
@@ -161,6 +162,7 @@ function CharterPartyDetail() {
           </span>
         }
         description={`${CP_TYPE_LABELS[cp.cpType] ?? cp.cpType}${cp.vessel ? ` — ${cp.vessel.name}` : ''}`}
+        meta={<CreatedBy by={cp.createdBy} at={cp.createdAt} verb="Créée" />}
         actions={
           <>
             {cp.permissions.editDraft && !cp.versions.length && (
@@ -447,7 +449,7 @@ function CharterPartyDetail() {
         open={cancelOpen}
         onOpenChange={setCancelOpen}
         title={`Annuler la Charter Party ${cp.reference}`}
-        description="Une CP annulée ne peut plus être rattachée ni versionnée. Les voyages rattachés devront être rattachés à la CP en vigueur."
+        description={`Cette CP a été ${createdBySentence(cp.createdBy, cp.createdAt, 'créée')}${cp.createdById !== me.id ? ' : vous n’en êtes pas l’auteur, prévenez-le avant d’annuler' : ''}. Une CP annulée ne peut plus être rattachée ni versionnée. Les voyages rattachés devront être rattachés à la CP en vigueur.`}
         confirmLabel="Annuler la CP"
         tone="danger"
         requireReason

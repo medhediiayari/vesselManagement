@@ -28,6 +28,13 @@ export const OverrideSchema = z.object({
   reason: z.string().trim().max(500).optional(),
 });
 
+/** Une permission au plus une fois : sinon violation d'unicité et 409 vague (ADM-27). */
+const uniqueOverrides = (max: number) =>
+  z
+    .array(OverrideSchema)
+    .max(max)
+    .refine((o) => new Set(o.map((x) => x.permissionKey)).size === o.length, 'Chaque permission ne peut figurer qu’une fois');
+
 export const CreateUserSchema = z.object({
   username,
   email: email.optional(),
@@ -38,7 +45,7 @@ export const CreateUserSchema = z.object({
   vesselScope: VesselScopeSchema.default({ mode: 'SELECTED', vesselIds: [] }),
   departments: DepartmentsAssignmentSchema.optional(),
   memberId: uuid.optional(),
-  overrides: z.array(OverrideSchema).max(100).default([]),
+  overrides: uniqueOverrides(100).default([]),
 });
 export class CreateUserDto extends createZodDto(CreateUserSchema) {}
 
@@ -54,7 +61,7 @@ export const UpdateUserSchema = z
 export class UpdateUserDto extends createZodDto(UpdateUserSchema) {}
 
 export class SetRolesDto extends createZodDto(z.object({ roleIds: z.array(uuid).max(20) })) {}
-export class SetOverridesDto extends createZodDto(z.object({ overrides: z.array(OverrideSchema).max(200) })) {}
+export class SetOverridesDto extends createZodDto(z.object({ overrides: uniqueOverrides(200) })) {}
 export class SetVesselScopeDto extends createZodDto(VesselScopeSchema) {}
 export class SetDepartmentsDto extends createZodDto(DepartmentsAssignmentSchema) {}
 export class LinkMemberDto extends createZodDto(z.object({ memberId: uuid.nullable() })) {}

@@ -145,6 +145,8 @@ export const ListNoonReportsSchema = PaginationSchema.extend({
   /** Bornes sur la date UTC du rapport (AAAA-MM-JJ, incluses) */
   from: dateOnly.optional(),
   to: dateOnly.optional(),
+  /** Brouillons non modifiés depuis N jours (audit FLT-25) */
+  staleDraftDays: z.coerce.number().int().min(1).max(365).optional(),
 });
 export class ListNoonReportsQuery extends createZodDto(ListNoonReportsSchema) {}
 

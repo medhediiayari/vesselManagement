@@ -29,11 +29,17 @@ import {
   NoonIssue,
   NoonSnapshot,
   NoonValues,
+  PreviousReport,
+  ReportSlot,
   buildNoonSnapshot,
   canTransitionNoon,
   diffNoonSnapshots,
   flattenSnapshot,
+  localDayKey,
   localTimeLabel,
+  noonPlausibilityWarnings,
+  reportDateBeforeVoyage,
+  sameReportSlot,
   validateForSubmission,
   validateNoonConsistency,
   validateNoonRanges,
@@ -44,6 +50,11 @@ export const OWNER_NOON_ATTACHMENT = 'noon_report_attachment';
 
 /** Un Noon Report n'est saisi que sur un voyage planifié ou en cours. */
 const REPORTABLE_VOYAGE_STATUSES = ['PLANNED', 'ACTIVE'];
+/** Audit FLT-05 : plus aucun rapport sur un navire vendu ou inactif. */
+const CLOSED_VESSEL_STATUSES = ['SOLD', 'INACTIVE'];
+/** Statuts d'un rapport transmis (référence pour les contrôles de vraisemblance). */
+const SENT_STATUSES: NoonStatus[] = ['SUBMITTED', 'ACKNOWLEDGED', 'CORRECTION_REQUESTED', 'CORRECTED'];
+const VOYAGE_BOUNDS_SELECT = { id: true, vesselId: true, status: true, reference: true, createdAt: true, etd: true, atd: true, laycanFrom: true } as const;
 const TX_OPTIONS = { timeout: 30_000 };
 
 function pickNoonValues(r: Record<string, unknown>): NoonValues {
@@ -123,6 +134,8 @@ export class NoonService implements OnModuleInit {
         q.reportType ? { reportType: q.reportType } : {},
         q.from ? { reportDateUtc: { gte: q.from } } : {},
         q.to ? { reportDateUtc: { lt: new Date(q.to.getTime() + 86_400_000) } } : {},
+        // Brouillons oubliés (audit FLT-25) : non modifiés depuis N jours
+        q.staleDraftDays ? { status: 'DRAFT' as const, updatedAt: { lt: new Date(Date.now() - q.staleDraftDays * 86_400_000) } } : {},
       ],
     };
     const [rows, total] = await Promise.all([
@@ -150,6 +163,7 @@ export class NoonService implements OnModuleInit {
           submittedAt: true,
           acknowledgedAt: true,
           lockVersion: true,
+          createdAt: true,
           updatedAt: true,
           vessel: { select: { id: true, code: true, name: true } },
           voyage: { select: { id: true, reference: true, status: true } },
@@ -159,7 +173,19 @@ export class NoonService implements OnModuleInit {
       this.prisma.noonReport.count({ where }),
     ]);
     const page = toPage(rows, q, total);
-    return { ...page, items: page.items.map((r) => ({ ...r, reportDateLocal: localTimeLabel(r.reportDateUtc, r.utcOffsetMinutes) })) };
+    // Brouillons : nombre de points bloquant la soumission, pour relancer l'auteur (audit FLT-25)
+    const draftIds = page.items.filter((r) => r.status === 'DRAFT').map((r) => r.id);
+    const drafts = draftIds.length ? await this.prisma.noonReport.findMany({ where: { id: { in: draftIds } } }) : [];
+    const now = new Date();
+    const pending = new Map(drafts.map((d) => [d.id, validateForSubmission(pickNoonValues(d), now).length]));
+    return {
+      ...page,
+      items: page.items.map((r) => ({
+        ...r,
+        reportDateLocal: localTimeLabel(r.reportDateUtc, r.utcOffsetMinutes),
+        pendingIssues: r.status === 'DRAFT' ? pending.get(r.id) ?? 0 : null,
+      })),
+    };
   }
 
   async get(ctx: AuthContext, id: string) {
@@ -177,7 +203,10 @@ export class NoonService implements OnModuleInit {
       this.labels([r.createdById, r.submittedById, r.acknowledgedById, ...r.revisions.map((x) => x.createdById), ...r.attachments.map((a) => a.uploadedById)]),
       this.prisma.storedFile.findMany({ where: { id: { in: r.attachments.map((a) => a.fileId) } } }),
     ]);
-    const editable = NOON_EDITABLE_STATUSES.includes(r.status);
+    // Audit FLT-18 : brouillon d'un voyage clôturé figé (ni modification ni soumission) ; suppression proposée
+    const voyageOpen = REPORTABLE_VOYAGE_STATUSES.includes(r.voyage.status);
+    const editable = NOON_EDITABLE_STATUSES.includes(r.status) && (r.status !== 'DRAFT' || voyageOpen);
+    const previous = editable ? await this.previousSent(r) : null;
     return {
       ...r,
       reportDateLocal: localTimeLabel(r.reportDateUtc, r.utcOffsetMinutes),
@@ -191,10 +220,14 @@ export class NoonService implements OnModuleInit {
       }),
       /** Contrôle préalable à la soumission (preview) : champs minimaux manquants / incohérences */
       submissionCheck: editable ? validateForSubmission(pickNoonValues(r), new Date()) : [],
+      /** Avertissements non bloquants (vraisemblance, audit FLT-11) */
+      submissionWarnings: editable ? noonPlausibilityWarnings(pickNoonValues(r), previous) : [],
+      voyageOpen,
       allowedTransitions: NOON_TRANSITIONS[r.status],
       permissions: {
         edit: editable && (r.status === 'DRAFT' ? can(ctx, 'noon.create') : can(ctx, 'noon.create') || can(ctx, 'noon.correct')),
-        submit: r.status === 'DRAFT' && can(ctx, 'noon.submit'),
+        submit: r.status === 'DRAFT' && voyageOpen && can(ctx, 'noon.submit'),
+        discard: r.status === 'DRAFT' && r.currentRevisionNo === 0 && (r.createdById === ctx.userId || can(ctx, 'noon.correct')),
         acknowledge:
           (r.status === 'SUBMITTED' || r.status === 'CORRECTED') &&
           can(ctx, 'noon.approve') &&
@@ -221,15 +254,17 @@ export class NoonService implements OnModuleInit {
   /** Un rapport appartient toujours à un navire ET à un voyage de ce navire (CDC §8.1). */
   async create(ctx: AuthContext, dto: CreateNoonReportDto) {
     const { voyageId, vesselId, ...fields } = dto;
-    const voyage = await this.prisma.voyage.findUnique({ where: { id: voyageId }, select: { id: true, vesselId: true, status: true, reference: true } });
+    const voyage = await this.prisma.voyage.findUnique({ where: { id: voyageId }, select: VOYAGE_BOUNDS_SELECT });
     if (!voyage) throw Errors.notFound('Voyage');
     this.access.assertVesselAccess(ctx, voyage.vesselId);
     if (vesselId && vesselId !== voyage.vesselId) throw Errors.validation('Le voyage n’appartient pas à ce navire');
     if (!REPORTABLE_VOYAGE_STATUSES.includes(voyage.status)) {
       throw Errors.business(`Voyage ${voyage.reference} ${voyage.status} : Noon Report possible uniquement sur un voyage planifié ou en cours`);
     }
-    this.assertValid([...validateNoonRanges(fields as NoonValues), ...validateNoonConsistency(fields as NoonValues, new Date())]);
-    await this.assertUniqueSlot(voyageId, fields.reportType, fields.reportDateUtc);
+    await this.assertVesselReporting(voyage.vesselId);
+    const bound = reportDateBeforeVoyage(fields.reportDateUtc, voyage);
+    this.assertValid([...validateNoonRanges(fields as NoonValues), ...validateNoonConsistency(fields as NoonValues, new Date()), ...(bound ? [bound] : [])]);
+    await this.assertUniqueSlot(voyageId, { reportType: fields.reportType, reportDateUtc: fields.reportDateUtc, utcOffsetMinutes: fields.utcOffsetMinutes });
 
     return this.prisma.$transaction(async (tx) => {
       const r = await tx.noonReport.create({
@@ -253,13 +288,16 @@ export class NoonService implements OnModuleInit {
     }
     if (before.status === 'DRAFT' && !can(ctx, 'noon.create')) throw Errors.forbidden('Permission requise : noon.create', { permission: 'noon.create' });
     if (before.lockVersion !== expectedVersion) throw Errors.staleVersion(undefined, { currentVersion: before.lockVersion });
+    const voyage = await this.prisma.voyage.findUniqueOrThrow({ where: { id: before.voyageId }, select: VOYAGE_BOUNDS_SELECT });
+    if (before.status === 'DRAFT' && !REPORTABLE_VOYAGE_STATUSES.includes(voyage.status)) {
+      // Audit FLT-18 : une modification ne pourrait jamais être soumise
+      throw Errors.invalidState(`Voyage ${voyage.reference} clôturé ou annulé : brouillon figé, à supprimer`, { voyageStatus: voyage.status });
+    }
     const merged = { ...pickNoonValues(before), ...(fields as NoonValues) };
-    this.assertValid([...validateNoonRanges(fields as NoonValues), ...validateNoonConsistency(merged, new Date())]);
-    if (
-      (fields.reportType && fields.reportType !== before.reportType) ||
-      (fields.reportDateUtc && fields.reportDateUtc.getTime() !== before.reportDateUtc.getTime())
-    ) {
-      await this.assertUniqueSlot(before.voyageId, fields.reportType ?? before.reportType, fields.reportDateUtc ?? before.reportDateUtc, id);
+    const bound = fields.reportDateUtc ? reportDateBeforeVoyage(fields.reportDateUtc, voyage) : null;
+    this.assertValid([...validateNoonRanges(fields as NoonValues), ...validateNoonConsistency(merged, new Date()), ...(bound ? [bound] : [])]);
+    if (this.slotChanged(before, fields)) {
+      await this.assertUniqueSlot(before.voyageId, this.slotOf(before, fields), id);
     }
     return this.prisma.$transaction(async (tx) => {
       await this.updateLocked(tx, before, expectedVersion, fields as Prisma.NoonReportUncheckedUpdateManyInput);
@@ -286,6 +324,7 @@ export class NoonService implements OnModuleInit {
     if (!REPORTABLE_VOYAGE_STATUSES.includes(voyage.status)) {
       throw Errors.business(`Voyage ${voyage.reference} ${voyage.status} : soumission impossible`);
     }
+    await this.assertVesselReporting(r.vesselId);
     this.assertValid(validateForSubmission(pickNoonValues(r), new Date()), 'Noon Report incomplet ou invalide : soumission refusée');
 
     const revisionNo = r.currentRevisionNo + 1;
@@ -447,12 +486,14 @@ export class NoonService implements OnModuleInit {
     if (r.lockVersion !== dto.expectedVersion) throw Errors.staleVersion(undefined, { currentVersion: r.lockVersion });
     const changes: NoonChanges = dto.changes ?? {};
     const values = { ...pickNoonValues(r), ...(changes as NoonValues) };
-    this.assertValid(validateForSubmission(values, new Date()), 'Correction invalide : champs minimaux manquants ou valeurs hors plage');
-    if (
-      (changes.reportType && changes.reportType !== r.reportType) ||
-      (changes.reportDateUtc && changes.reportDateUtc.getTime() !== r.reportDateUtc.getTime())
-    ) {
-      await this.assertUniqueSlot(r.voyageId, changes.reportType ?? r.reportType, changes.reportDateUtc ?? r.reportDateUtc, id);
+    const voyage = changes.reportDateUtc ? await this.prisma.voyage.findUniqueOrThrow({ where: { id: r.voyageId }, select: VOYAGE_BOUNDS_SELECT }) : null;
+    const bound = voyage && changes.reportDateUtc ? reportDateBeforeVoyage(changes.reportDateUtc, voyage) : null;
+    this.assertValid(
+      [...validateForSubmission(values, new Date()), ...(bound ? [bound] : [])],
+      'Correction invalide : champs minimaux manquants ou valeurs hors plage',
+    );
+    if (this.slotChanged(r, changes)) {
+      await this.assertUniqueSlot(r.voyageId, this.slotOf(r, changes), id);
     }
     const previous = await this.prisma.noonReportRevision.findFirst({ where: { noonReportId: id }, orderBy: { revisionNo: 'desc' } });
     const prevSnapshot = (previous?.data as unknown as NoonSnapshot | undefined) ?? null;
@@ -626,13 +667,67 @@ export class NoonService implements OnModuleInit {
     }
   }
 
-  /** Même date pour un même voyage et un même type : interdit (unique voyage/type/date). */
-  private async assertUniqueSlot(voyageId: string, reportType: NoonReport['reportType'], reportDateUtc: Date, excludeId?: string) {
-    const dup = await this.prisma.noonReport.findFirst({
-      where: { voyageId, reportType, reportDateUtc, ...(excludeId ? { id: { not: excludeId } } : {}) },
-      select: { id: true },
+  /**
+   * Un seul rapport par voyage et par créneau (audit FLT-07) : même jour local du bord pour
+   * NOON / MIDNIGHT (sinon les consommations sont comptées deux fois), même horodatage pour
+   * ARRIVAL / DEPARTURE. Un rapport archivé ne bloque que le même horodatage (index unique en base).
+   */
+  private async assertUniqueSlot(voyageId: string, slot: ReportSlot, excludeId?: string) {
+    // Fenêtre de 2 jours de part et d'autre : couvre tous les décalages horaires (-12 h / +14 h)
+    const window = 2 * 86_400_000;
+    const candidates = await this.prisma.noonReport.findMany({
+      where: {
+        voyageId,
+        reportType: slot.reportType,
+        reportDateUtc: { gte: new Date(slot.reportDateUtc.getTime() - window), lte: new Date(slot.reportDateUtc.getTime() + window) },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true, status: true, reportType: true, reportDateUtc: true, utcOffsetMinutes: true },
     });
-    if (dup) throw Errors.duplicate('Un rapport de ce type existe déjà à cette date pour ce voyage', { existingId: dup.id });
+    const dup = candidates.find(
+      (c) => c.reportDateUtc.getTime() === slot.reportDateUtc.getTime() || (c.status !== 'ARCHIVED' && sameReportSlot(c, slot)),
+    );
+    if (dup) {
+      const daily = dup.reportType === 'NOON' || dup.reportType === 'MIDNIGHT';
+      throw Errors.duplicate(
+        daily
+          ? `Un rapport ${dup.reportType} existe déjà pour ce voyage le ${localDayKey(dup.reportDateUtc, dup.utcOffsetMinutes)} (jour local du bord)`
+          : 'Un rapport de ce type existe déjà à cette date pour ce voyage',
+        { existingId: dup.id },
+      );
+    }
+  }
+
+  private slotChanged(r: NoonReport, f: { reportType?: NoonReport['reportType']; reportDateUtc?: Date; utcOffsetMinutes?: number | null }) {
+    return (
+      (f.reportType !== undefined && f.reportType !== r.reportType) ||
+      (f.reportDateUtc !== undefined && f.reportDateUtc.getTime() !== r.reportDateUtc.getTime()) ||
+      (f.utcOffsetMinutes !== undefined && f.utcOffsetMinutes !== r.utcOffsetMinutes)
+    );
+  }
+
+  private slotOf(r: NoonReport, f: { reportType?: NoonReport['reportType']; reportDateUtc?: Date; utcOffsetMinutes?: number | null }): ReportSlot {
+    return {
+      reportType: f.reportType ?? r.reportType,
+      reportDateUtc: f.reportDateUtc ?? r.reportDateUtc,
+      utcOffsetMinutes: f.utcOffsetMinutes !== undefined ? f.utcOffsetMinutes : r.utcOffsetMinutes,
+    };
+  }
+
+  private async assertVesselReporting(vesselId: string) {
+    const vessel = await this.prisma.vessel.findUnique({ where: { id: vesselId }, select: { status: true } });
+    if (vessel && CLOSED_VESSEL_STATUSES.includes(vessel.status)) {
+      throw Errors.business('Navire vendu ou inactif : aucun Noon Report ne peut être saisi ni soumis');
+    }
+  }
+
+  /** Dernier rapport transmis avant celui-ci sur le même voyage (référence de vraisemblance). */
+  private async previousSent(r: NoonReport): Promise<PreviousReport | null> {
+    return this.prisma.noonReport.findFirst({
+      where: { voyageId: r.voyageId, id: { not: r.id }, status: { in: SENT_STATUSES }, reportDateUtc: { lt: r.reportDateUtc } },
+      orderBy: { reportDateUtc: 'desc' },
+      select: { reportDateUtc: true, foRobMt: true, doRobMt: true },
+    });
   }
 
   /** Mise à jour sous verrou optimiste + état attendu ; 409 STALE_VERSION ou ALREADY_PROCESSED. */

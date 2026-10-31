@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ApprovalDecisionKind, ApprovalStatus, CertificateRequestKind, NotificationPriority, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { Errors } from '../../common/errors';
-import { PrismaService, Tx } from '../../prisma/prisma.service';
+import { Db, PrismaService, Tx } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { type AuthContext, can } from '../access/auth-context';
 import { assertMemberVisible } from '../access/member-access';
@@ -52,6 +52,8 @@ import {
 const MODULE = 'certificates' as const;
 const OPEN = [...OPEN_REQUEST_STATUSES];
 const DATA_KINDS = [...DATA_REQUEST_KINDS];
+/** Notifications adressées aux validateurs eux-mêmes (l'escalade vise un rôle distinct). */
+const VALIDATOR_NOTIFICATION_TYPES = ['certificate.approval_requested', 'certificate.approval_updated', 'certificate.approval_overdue'];
 
 const CERT_INCLUDE = {
   type: { include: { validators: { select: { principalType: true, principalId: true } } } },
@@ -91,6 +93,22 @@ function summary(r: RequestRef) {
   };
 }
 
+/** Résultat d'une soumission : notification des validateurs ou publication directe. */
+type SubmitOutcome = { notifiedValidators: number; warnings: string[]; autoApproved?: boolean } & Record<string, unknown>;
+
+/** Publication directe : la réponse porte le statut APPROVED, pas PENDING_APPROVAL (CRT-10). */
+function afterSubmitRef(ref: RequestRef, outcome: SubmitOutcome): RequestRef {
+  return outcome.autoApproved ? { ...ref, status: 'APPROVED' } : ref;
+}
+
+/**
+ * Publication directe sans circuit de validation : `certificates.self_approve` (toute demande de
+ * l'auteur) ou `certificates.renewal.self_approve` (renouvellements uniquement).
+ */
+export function canSelfApprove(ctx: AuthContext, kind: CertificateRequestKind): boolean {
+  return can(ctx, 'certificates.self_approve') || (kind === 'RENEWAL' && can(ctx, 'certificates.renewal.self_approve'));
+}
+
 const DECISION_LABELS: Record<ApprovalDecisionKind, string> = {
   APPROVE: 'approuvée',
   REJECT: 'refusée',
@@ -127,12 +145,15 @@ export class CertificateWorkflowService {
    * le renouvellement (409). Sérialisable : deux créations concurrentes ne passent pas toutes deux.
    */
   async create(ctx: AuthContext, dto: CreateCertificateDto) {
-    if (dto.submit) this.access.assertCan(ctx, 'certificates.submit');
-    const { subjectKind, vesselId, memberId, typeId, fileId, changeNote, submit, ...patch } = dto;
+    // Publication directe : elle vaut soumission (même règle que renew / submit — CRT-09)
+    if (dto.submit && !canSelfApprove(ctx, 'CREATE')) this.access.assertCan(ctx, 'certificates.submit');
+    const { subjectKind, vesselId, memberId, typeId, fileId, changeNote, submit, folderId, ...patch } = dto;
+    if (folderId) this.access.assertCan(ctx, 'certificates.folders.manage');
     const data = mergeCertificateData(EMPTY_CERTIFICATE_DATA, patch);
     this.checkData(data);
 
     return this.prisma.serializable(async (tx) => {
+      if (folderId && !(await tx.certificateFolder.count({ where: { id: folderId } }))) throw Errors.notFound('Dossier');
       const type = await tx.certificateType.findUnique({ where: { id: typeId } });
       if (!type) throw Errors.notFound('Type de certificat');
       if (!type.isActive) throw Errors.business('Type de certificat désactivé');
@@ -158,6 +179,7 @@ export class CertificateWorkflowService {
           vesselId: subjectKind === 'VESSEL' ? vesselId! : null,
           memberId: subjectKind === 'MEMBER' ? memberId! : null,
           typeId,
+          folderId: folderId ?? null,
           documentMissing: true,
           createdById: ctx.userId,
         },
@@ -171,7 +193,7 @@ export class CertificateWorkflowService {
           entityType: 'certificate',
           entityId: cert.id,
           vesselId: cert.vesselId,
-          after: { subjectKind, vesselId: cert.vesselId, memberId: cert.memberId, typeId, typeCode: type.code },
+          after: { subjectKind, vesselId: cert.vesselId, memberId: cert.memberId, typeId, typeCode: type.code, folderId: cert.folderId },
         },
         tx,
       );
@@ -186,7 +208,8 @@ export class CertificateWorkflowService {
    * opérationnel passe « en cours » sans toucher à la validité ni aux rappels (ADM-048).
    */
   async renew(ctx: AuthContext, certificateId: string, dto: RenewCertificateDto) {
-    if (dto.submit) this.access.assertCan(ctx, 'certificates.submit');
+    // Renouvellement sans approbation : la publication directe vaut soumission
+    if (dto.submit && !canSelfApprove(ctx, 'RENEWAL')) this.access.assertCan(ctx, 'certificates.submit');
     return this.prisma.$transaction(async (tx) => {
       const cert = await this.loadCertificate(ctx, certificateId, tx);
       this.assertActive(cert);
@@ -204,14 +227,15 @@ export class CertificateWorkflowService {
       const data = mergeCertificateData(base, patch);
       this.checkData(data);
       const res = await this.openRequest(ctx, tx, cert, { kind: 'RENEWAL', data, fileId: fileId ?? null, attachFile: true, changeNote, submit });
-      await this.ensureRenewalInProgress(ctx, tx, cert);
+      // Publication directe : l'approbation a déjà clôturé le suivi, ne pas le rouvrir (CRT-01)
+      if (!res.autoApproved) await this.ensureRenewalInProgress(ctx, tx, cert);
       return { certificateId: cert.id, ...res };
     });
   }
 
   /** POST /certificates/:id/corrections — demande CORRECTION (patch motivé de la révision courante). */
   async correct(ctx: AuthContext, certificateId: string, dto: CorrectionDto) {
-    if (dto.submit) this.access.assertCan(ctx, 'certificates.submit');
+    if (dto.submit && !canSelfApprove(ctx, 'CORRECTION')) this.access.assertCan(ctx, 'certificates.submit');
     return this.prisma.$transaction(async (tx) => {
       const cert = await this.loadCertificate(ctx, certificateId, tx);
       this.assertActive(cert);
@@ -325,6 +349,7 @@ export class CertificateWorkflowService {
       const req = await this.loadRequest(ctx, requestId, tx);
       const cert = req.certificate;
       if (req.requestedById !== ctx.userId) throw Errors.forbidden('Seul le demandeur peut soumettre sa demande');
+      if (!canSelfApprove(ctx, req.kind)) this.access.assertCan(ctx, 'certificates.submit');
       this.assertActive(cert);
       if (req.status === 'PENDING_APPROVAL') throw Errors.invalidState('Demande déjà soumise à approbation');
       assertTransition(req.status, 'PENDING_APPROVAL');
@@ -350,7 +375,7 @@ export class CertificateWorkflowService {
       if (!cas.count) throw await this.casFailure(tx, req.id);
       const submitted: RequestRef = { ...req, status: 'PENDING_APPROVAL', submittedAt: now, uploadedById: req.attachment?.uploadedById };
       const res = await this.afterSubmit(ctx, tx, cert, submitted, req.status, req._count.decisions, !!req.versions[0]?.fileId);
-      return { request: summary(submitted), ...res };
+      return { request: summary(afterSubmitRef(submitted, res)), ...res };
     });
   }
 
@@ -592,7 +617,11 @@ export class CertificateWorkflowService {
       await this.notifications.resolveForEntity('certificate_request', req.id, APPROVAL_NOTIFICATION_PREFIX, tx);
       const decided: RequestRef = { ...req, status: target };
       await this.notifyRequester(ctx, tx, cert, decided, dto.decision, dto.comment, req._count.decisions);
-      await this.notifyValidators(ctx, tx, cert, decided, 'closed', { decision: dto.decision, cycle: req._count.decisions });
+      // Un retour n'est pas une clôture : la demande reviendra après correction (CRT-12)
+      await this.notifyValidators(ctx, tx, cert, decided, dto.decision === 'RETURN' ? 'returned' : 'closed', {
+        decision: dto.decision,
+        cycle: req._count.decisions,
+      });
       return { request: summary(decided), decision: dto.decision, ...outcome };
     });
   }
@@ -826,7 +855,7 @@ export class CertificateWorkflowService {
    * `certificates.submit` comme toute autre demande ; `submit: false` crée un brouillon.
    */
   async addAttachment(ctx: AuthContext, certificateId: string, dto: AddAttachmentDto) {
-    if (dto.submit) this.access.assertCan(ctx, 'certificates.submit');
+    if (dto.submit && !canSelfApprove(ctx, 'ATTACHMENT')) this.access.assertCan(ctx, 'certificates.submit');
     return this.prisma.$transaction(async (tx) => {
       const cert = await this.loadCertificate(ctx, certificateId, tx);
       this.assertActive(cert);
@@ -880,10 +909,10 @@ export class CertificateWorkflowService {
         tx,
       );
       const ref: RequestRef = { ...request, uploadedById: ctx.userId };
-      const res = dto.submit
+      const res: SubmitOutcome = dto.submit
         ? await this.afterSubmit(ctx, tx, cert, ref, 'DRAFT', 0, true)
         : { notifiedValidators: 0, warnings: ['Pièce enregistrée en brouillon : soumettez la demande pour la faire valider'] };
-      return { certificateId: cert.id, attachmentId: att.id, request: summary(ref), ...res };
+      return { certificateId: cert.id, attachmentId: att.id, request: summary(afterSubmitRef(ref, res)), ...res };
     });
   }
 
@@ -909,6 +938,96 @@ export class CertificateWorkflowService {
     });
     const readers = new Set(await this.certAccess.filterReaders(this.prisma, cert, users.map((u) => u.id)));
     return users.filter((u) => readers.has(u.id));
+  }
+
+  /**
+   * GET /certificates/:id/approvers?kind= — destinataires de la demande d'approbation si l'appelant
+   * la soumettait maintenant (même règle que la notification : permission d'approbation + accès au
+   * certificat + validateurs désignés du type ; jamais le demandeur), ou publication directe.
+   */
+  async approvers(ctx: AuthContext, certificateId: string, kind: CertificateRequestKind) {
+    const cert = await this.loadCertificate(ctx, certificateId, this.prisma);
+    const selfApprove = canSelfApprove(ctx, kind);
+    const ids = selfApprove
+      ? []
+      : await this.certAccess.eligibleValidatorIds(this.prisma, cert, { kind, requestedById: ctx.userId }, cert.type.validators);
+    const users = ids.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: ids }, status: 'ACTIVE' },
+          select: { id: true, displayName: true, jobTitle: true },
+          orderBy: { displayName: 'asc' },
+        })
+      : [];
+    return { selfApprove, validatorsConfigured: cert.type.validators.length, approvers: users };
+  }
+
+  /**
+   * Validateurs d'un type modifiés (après la validation de la modification) : les demandes de
+   * données en attente suivent la nouvelle désignation (CRT-03). Les notifications d'approbation
+   * des personnes devenues inéligibles sont résolues ; les nouveaux validateurs sont notifiés
+   * (plateforme + e-mail), sans doublon pour ceux qui l'étaient déjà. Exécuté hors transaction :
+   * un type peut compter des centaines de demandes en attente (import Excel).
+   */
+  async realignPendingValidators(ctx: AuthContext, typeId: string, db: Db = this.prisma) {
+    const pending = await db.certificateApprovalRequest.findMany({
+      where: { status: 'PENDING_APPROVAL', kind: { in: DATA_KINDS }, certificate: { typeId, archivedAt: null } },
+      include: REQUEST_INCLUDE,
+    });
+    let notified = 0;
+    let withdrawn = 0;
+    const now = Date.now();
+    // Éligibilité identique pour un même titulaire (navire / marin), au demandeur près
+    const bySubject = new Map<string, string[]>();
+    for (const req of pending) {
+      const cert = req.certificate;
+      const key = `${cert.subjectKind}:${cert.vesselId ?? cert.memberId}`;
+      if (!bySubject.has(key)) {
+        bySubject.set(key, await this.certAccess.eligibleValidatorIds(db, cert, { kind: req.kind, requestedById: '' }, cert.type.validators));
+      }
+      const eligible = bySubject.get(key)!.filter((id) => id !== req.requestedById);
+      const stale = await db.notification.updateMany({
+        where: {
+          entityType: 'certificate_request',
+          entityId: req.id,
+          resolvedAt: null,
+          type: { in: VALIDATOR_NOTIFICATION_TYPES },
+          userId: { notIn: eligible },
+        },
+        data: { resolvedAt: new Date() },
+      });
+      withdrawn += stale.count;
+      const already = new Set(
+        (
+          await db.notification.findMany({
+            where: { entityType: 'certificate_request', entityId: req.id, resolvedAt: null, type: { in: VALIDATOR_NOTIFICATION_TYPES } },
+            select: { userId: true },
+          })
+        ).map((n) => n.userId),
+      );
+      const newcomers = eligible.filter((id) => !already.has(id));
+      if (!newcomers.length) continue;
+      const sent = await this.notifications.notify(
+        {
+          userIds: newcomers,
+          type: 'certificate.approval_requested',
+          title: `Certificat à approuver : ${cert.type.name} — ${subjectLabel(cert)}`,
+          body: `Demande de ${REQUEST_KIND_LABELS[req.kind]} (version ${req.version}) en attente : vous êtes désormais validateur désigné pour ce type (modification par ${ctx.displayName}).`,
+          module: MODULE,
+          entityType: 'certificate_request',
+          entityId: req.id,
+          vesselId: cert.vesselId,
+          link: certificateLink(cert.id, req.id),
+          priority: 'HIGH',
+          mandatory: true,
+          email: true,
+          dedupeKey: `certreq:${req.id}:v${req.version}:reassigned:${now}`,
+          requiredPermission: approvalPermissionFor(req.kind),
+        },
+        db,
+      );
+      notified += sent.length;
+    }
+    return { pendingRequests: pending.length, notifiedValidators: notified, withdrawnNotifications: withdrawn };
   }
 
   async setRenewal(ctx: AuthContext, certificateId: string, dto: SetRenewalDto) {
@@ -1028,6 +1147,27 @@ export class CertificateWorkflowService {
         },
         tx,
       );
+      // Suivi de renouvellement sans objet : tâche active clôturée, statut remis à zéro (CRT-04)
+      const task = await tx.certificateRenewalTask.findFirst({ where: { certificateId: cert.id, status: { not: 'COMPLETED' } } });
+      if (task) await tx.certificateRenewalTask.update({ where: { id: task.id }, data: { status: 'COMPLETED', completedAt: now } });
+      const resetStatus = cert.renewalStatus === 'IN_PROGRESS';
+      if (task || resetStatus) {
+        if (resetStatus) await tx.certificate.update({ where: { id: cert.id }, data: { renewalStatus: 'NOT_STARTED' } });
+        await this.audit.record(
+          ctx,
+          {
+            action: 'certificate.renewal_updated',
+            module: MODULE,
+            entityType: 'certificate',
+            entityId: cert.id,
+            vesselId: cert.vesselId,
+            before: { renewalStatus: cert.renewalStatus, taskStatus: task?.status ?? null },
+            after: { renewalStatus: resetStatus ? 'NOT_STARTED' : cert.renewalStatus, taskStatus: task ? 'COMPLETED' : null },
+            metadata: { automatic: true, reason: 'Certificat archivé', taskId: task?.id ?? null },
+          },
+          tx,
+        );
+      }
       // Plus aucun rappel sur un certificat archivé
       await this.notifications.resolveForEntity('certificate', cert.id, REMINDER_NOTIFICATION_PREFIX, tx);
       return { certificateId: cert.id, archivedAt: now, archiveReason: dto.reason };
@@ -1048,7 +1188,7 @@ export class CertificateWorkflowService {
   private async loadRequest(ctx: AuthContext, id: string, tx: Tx): Promise<LoadedRequest> {
     const req = await tx.certificateApprovalRequest.findUnique({ where: { id }, include: REQUEST_INCLUDE });
     if (!req) throw Errors.notFound('Demande de certificat');
-    await this.certAccess.assertVisible(ctx, req.certificate, tx);
+    await this.certAccess.assertVisible(ctx, req.certificate, tx, 'Demande de certificat');
     return req;
   }
 
@@ -1120,6 +1260,12 @@ export class CertificateWorkflowService {
     return att;
   }
 
+  /** Correction sans nouveau scan : le document officiel courant est repris à l'approbation (CRT-08). */
+  private async keepsOfficialDocument(tx: Tx, cert: Cert, kind: CertificateRequestKind): Promise<boolean> {
+    if (kind !== 'CORRECTION' || !cert.currentRevisionId) return false;
+    return (await tx.certificateAttachment.count({ where: { revisionId: cert.currentRevisionId, status: 'OFFICIAL' } })) > 0;
+  }
+
   /** Pièces proposées par les versions d'une demande et restées en attente -> REJECTED. */
   private async rejectPendingAttachmentsOf(tx: Tx, requestId: string, certificateId: string) {
     const versions = await tx.certificateRequestVersion.findMany({ where: { requestId }, select: { fileId: true } });
@@ -1188,9 +1334,9 @@ export class CertificateWorkflowService {
       },
       tx,
     );
-    let res: { notifiedValidators: number; warnings: string[] } = { notifiedValidators: 0, warnings: [] };
+    let res: SubmitOutcome = { notifiedValidators: 0, warnings: [] };
     if (input.submit) res = await this.afterSubmit(ctx, tx, cert, request, 'DRAFT', 0, !!input.fileId);
-    return { request: summary(request), ...res };
+    return { request: summary(afterSubmitRef(request, res)), ...res };
   }
 
   /** Audit de soumission + notification de TOUS les validateurs éligibles (ADM-055) + avertissements. */
@@ -1202,7 +1348,7 @@ export class CertificateWorkflowService {
     fromStatus: ApprovalStatus,
     cycle: number,
     hasFile: boolean,
-  ) {
+  ): Promise<SubmitOutcome> {
     await this.audit.record(
       ctx,
       {
@@ -1218,11 +1364,12 @@ export class CertificateWorkflowService {
       tx,
     );
     const warnings: string[] = [];
-    if (!hasFile && cert.type.requiresDocument && req.kind !== 'ATTACHMENT') {
+    if (!hasFile && cert.type.requiresDocument && req.kind !== 'ATTACHMENT' && !(await this.keepsOfficialDocument(tx, cert, req.kind))) {
       warnings.push('Aucun document joint : le certificat sera signalé « Document manquant » après approbation (ADM-064)');
     }
-    // Publication directe : l'auteur a le droit certificates.self_approve (Super Admin, CSO…) — pas de circuit de validation
-    if (can(ctx, 'certificates.self_approve')) {
+    // Publication directe : certificates.self_approve (Super Admin, CSO…) ou, pour un renouvellement,
+    // certificates.renewal.self_approve — pas de circuit de validation
+    if (canSelfApprove(ctx, req.kind)) {
       const outcome = await this.autoApprove(ctx, tx, req.id);
       return { notifiedValidators: 0, warnings, autoApproved: true, ...outcome };
     }
@@ -1233,7 +1380,7 @@ export class CertificateWorkflowService {
     return { notifiedValidators: notified.length, warnings };
   }
 
-  /** Approbation immédiate par l'auteur lui-même (certificates.self_approve), tracée comme une décision APPROVE. */
+  /** Approbation immédiate par l'auteur lui-même (canSelfApprove), tracée comme une décision APPROVE. */
   private async autoApprove(ctx: AuthContext, tx: Tx, requestId: string): Promise<Record<string, unknown>> {
     const req = await this.loadRequest(ctx, requestId, tx);
     const cert = req.certificate;
@@ -1270,7 +1417,7 @@ export class CertificateWorkflowService {
     tx: Tx,
     cert: Cert,
     req: RequestRef,
-    event: 'submitted' | 'updated' | 'cancelled' | 'closed',
+    event: 'submitted' | 'updated' | 'cancelled' | 'closed' | 'returned',
     detail: { cycle?: number; reason?: string; decision?: ApprovalDecisionKind } = {},
   ): Promise<string[]> {
     const recipients = await this.certAccess.eligibleValidatorIds(tx, cert, req, cert.type.validators, [ctx.userId]);
@@ -1306,6 +1453,14 @@ export class CertificateWorkflowService {
         type: 'certificate.request_closed',
         title: `Demande de certificat clôturée : ${label}`,
         body: `Demande de ${kind} ${detail.decision ? DECISION_LABELS[detail.decision] : 'traitée'} par ${ctx.displayName} : aucune action requise.`,
+        email: false,
+        mandatory: false,
+        priority: 'LOW',
+      },
+      returned: {
+        type: 'certificate.request_returned',
+        title: `Demande de certificat retournée au demandeur : ${label}`,
+        body: `Demande de ${kind} retournée pour correction par ${ctx.displayName} : aucune action requise avant sa nouvelle soumission.`,
         email: false,
         mandatory: false,
         priority: 'LOW',

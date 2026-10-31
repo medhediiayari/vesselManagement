@@ -377,6 +377,9 @@ export interface RfqQuotationSummary {
   status: QuotationStatus;
   receivedAt: string;
   validUntil: string | null;
+  freightAmount?: string | null;
+  taxAmount?: string | null;
+  discountAmount?: string | null;
 }
 
 export interface RfqDetail extends Omit<RfqListItem, '_count' | 'suppliers' | 'prs' | 'quotationsReceived' | 'hasPurchaseOrder' | 'vessel'> {
@@ -504,6 +507,7 @@ export interface Selection {
     id: string;
     rfqLineId: string;
     unitPrice: string | null;
+    unit?: string | null;
     quotation: { id: string; currency: string; supplier: SupplierMini };
   };
 }
@@ -876,6 +880,8 @@ export interface InvoiceListItem {
   updatedAt: string;
   supplier: SupplierMini;
   orders: { invoiceId: string; poId: string; amount: string | null; po: { id: string; number: string; status: PoStatus } }[];
+  /** Liste : rapprochement recalculé pour les factures à examiner (RECEIVED / UNDER_REVIEW), sinon null */
+  reconciliation?: { suggestion: 'MATCHED' | 'DISPUTED'; reasons: InvoiceMatching['reasons'] } | null;
 }
 
 export interface InvoiceMatching {
@@ -913,7 +919,7 @@ export interface PurchasingBoard {
     awaitingRemainder: number;
   };
   variances?: { open: number; receiptsToValidate: number };
-  invoices?: { toReview: number; disputed: number };
+  invoices?: { toReview: number; disputed: number; reconciliationGaps?: number; reconciliationGapsCapped?: boolean };
 }
 
 export interface ReviewRuleDef {

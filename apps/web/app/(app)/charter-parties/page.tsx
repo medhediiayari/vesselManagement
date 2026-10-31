@@ -15,6 +15,7 @@ import { CpFormDialog } from '@/components/voyages/cp-form';
 import { CP_STATUS_LABELS, CP_TYPE_LABELS, CP_VERSION_KIND_LABELS, fmtLaycan } from '@/components/voyages/lib';
 import { CpStatusBadge } from '@/components/voyages/status';
 import type { CpListItem } from '@/components/voyages/types';
+import { CreatedBy } from '@/components/amc/created-by';
 
 function CharterPartiesList() {
   const router = useRouter();
@@ -141,6 +142,7 @@ function CharterPartiesList() {
             hideBelow: 'md',
           },
           { key: 'voyages', header: 'Voyages', cell: (cp) => (cp.voyages.length ? cp.voyages.map((v) => v.reference).join(', ') : '—'), hideBelow: 'lg' },
+          { key: 'createdBy', header: 'Créée par', cell: (cp) => <CreatedBy by={cp.createdBy} at={cp.createdAt} compact />, hideBelow: 'md' },
         ]}
       />
       <CpFormDialog

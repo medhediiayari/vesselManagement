@@ -233,6 +233,21 @@ export function ActionLink({
   );
 }
 
+/**
+ * Jours de service d'une affectation (audit UI-03) : jusqu'à aujourd'hui seulement si le marin est
+ * à bord ; une affectation terminée sans date de débarquement n'a pas de durée calculable.
+ */
+export function servedDays(a: { status: string; actualJoinDate: string | null; actualSignOffDate: string | null }): number | null {
+  if (!a.actualJoinDate) return null;
+  if (a.actualSignOffDate) return daysBetween(a.actualJoinDate, a.actualSignOffDate);
+  return a.status === 'ONBOARD' ? daysBetween(a.actualJoinDate, null) : null;
+}
+
+/** Vrai pour une affectation terminée dont la date de débarquement manque (données reprises). */
+export function missingSignOff(a: { status: string; actualJoinDate: string | null; actualSignOffDate: string | null }): boolean {
+  return a.status === 'COMPLETED' && !a.actualSignOffDate;
+}
+
 /** Nombre de jours entre deux dates civiles (inclusif côté début). */
 export function daysBetween(from: string | null, to: string | null): number | null {
   if (!from) return null;

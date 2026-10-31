@@ -104,7 +104,7 @@ export default function NewPurchaseRequestPage() {
       return;
     }
     if (summary.incomplete.length) {
-      toast.error(`Ligne(s) ${summary.incomplete.join(', ')} incomplète(s) : désignation, quantité > 0 et unité sont obligatoires.`);
+      toast.error(`Ligne(s) ${summary.incomplete.join(', ')} à corriger : désignation, quantité > 0 et unité sont obligatoires.`);
       return;
     }
     if (andSubmit && !summary.valid.length) {
@@ -188,10 +188,10 @@ export default function NewPurchaseRequestPage() {
 
         <Panel
           title={`Lignes (${summary.valid.length} valide${summary.valid.length > 1 ? 's' : ''})`}
-          actions={<span className="text-xs text-ink-muted">{localSavedAt ? `Saisie conservée localement à ${fmtDateTime(localSavedAt)}` : 'Saisie conservée localement'}</span>}
+          actions={<span className="text-xs text-ink-muted">{localSavedAt ? `Saisie conservée localement le ${fmtDateTime(localSavedAt)} (heure locale)` : 'Saisie conservée localement'}</span>}
         >
           {showErrors && summary.incomplete.length > 0 && (
-            <Callout tone="danger" className="mb-3" title={`Ligne(s) ${summary.incomplete.join(', ')} incomplète(s)`}>
+            <Callout tone="danger" className="mb-3" title={`Ligne(s) ${summary.incomplete.join(', ')} à corriger`}>
               Désignation, quantité strictement positive (3 décimales max.) et unité sont obligatoires. Les lignes entièrement vides sont ignorées.
             </Callout>
           )}

@@ -3,6 +3,7 @@
 import { Anchor, Ban, CalendarPlus, Info, LogOut } from 'lucide-react';
 import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
+import { CreatedBy } from '@/components/amc/created-by';
 import { Button } from '@/components/ui/button';
 import { Panel } from '@/components/ui/page';
 import { EmptyState } from '@/components/ui/states';
@@ -15,7 +16,7 @@ import {
   SignOffAssignmentDialog,
   type AssignmentRef,
 } from './assignment-dialogs';
-import { AssignmentStatusBadge, daysBetween } from './member-ui';
+import { AssignmentStatusBadge, missingSignOff, servedDays } from './member-ui';
 import { memberName, type MemberAssignment, type MemberDetail } from './types';
 
 function Stat({ label, value }: { label: string; value: ReactNode }) {
@@ -61,12 +62,17 @@ export function MemberAssignments({ member, readOnly }: { member: MemberDetail; 
     joinPort: a.joinPort,
     relievesAssignmentId: a.relievesAssignmentId,
     actualJoinDate: a.actualJoinDate,
+    memberId: member.id,
+    vesselId: a.vessel.id,
+    voyageId: a.voyage?.id ?? null,
+    createdBy: a.createdBy,
+    createdAt: a.createdAt,
   });
 
   const all = [...member.currentAssignments, ...member.assignmentHistory];
   const seaDays = all
     .filter((a) => a.status === 'ONBOARD' || a.status === 'COMPLETED')
-    .reduce((s, a) => s + (daysBetween(a.actualJoinDate, a.actualSignOffDate) ?? 0), 0);
+    .reduce((s, a) => s + (servedDays(a) ?? 0), 0);
   const completed = member.assignmentHistory.filter((a) => a.status === 'COMPLETED');
   const lastSignOff = completed.map((a) => a.actualSignOffDate).filter(Boolean).sort().pop() ?? null;
   const canPlan = canAssign && !member.archivedAt && member.status !== 'INACTIVE';
@@ -90,6 +96,9 @@ export function MemberAssignments({ member, readOnly }: { member: MemberDetail; 
             <th scope="col" className="hidden lg:table-cell">
               Voyage
             </th>
+            <th scope="col" className="hidden md:table-cell">
+              Planifié par
+            </th>
             {withActions && canAssign && (
               <th scope="col" className="text-right">
                 Actions
@@ -100,7 +109,7 @@ export function MemberAssignments({ member, readOnly }: { member: MemberDetail; 
         <tbody>
           {rows.map((a) => {
             const accessible = !!vesselById(a.vessel.id);
-            const days = a.status === 'ONBOARD' || a.status === 'COMPLETED' ? daysBetween(a.actualJoinDate, a.actualSignOffDate) : null;
+            const days = a.status === 'ONBOARD' || a.status === 'COMPLETED' ? servedDays(a) : null;
             return (
               <tr key={a.id}>
                 <td>
@@ -126,7 +135,9 @@ export function MemberAssignments({ member, readOnly }: { member: MemberDetail; 
                 <td>
                   <DateCell actual={a.actualSignOffDate} planned={a.status === 'CANCELLED' ? null : a.plannedSignOffDate} />
                 </td>
-                <td className="text-right tabular">{days ?? '—'}</td>
+                <td className="text-right tabular">
+                  {days ?? (missingSignOff(a) ? <span className="text-xs text-ink-soft">débarquement manquant</span> : '—')}
+                </td>
                 <td className="hidden text-xs lg:table-cell">{[a.joinPort, a.signOffPort].filter(Boolean).join(' → ') || '—'}</td>
                 <td className="hidden lg:table-cell">
                   {a.voyage ? (
@@ -136,6 +147,9 @@ export function MemberAssignments({ member, readOnly }: { member: MemberDetail; 
                   ) : (
                     '—'
                   )}
+                </td>
+                <td className="hidden md:table-cell">
+                  {a.createdBy ? <CreatedBy by={a.createdBy} at={a.createdAt} verb="Planifié" compact /> : <span className="text-ink-soft">—</span>}
                 </td>
                 {withActions && canAssign && (
                   <td>

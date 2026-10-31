@@ -1,13 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, StoredFile } from '@prisma/client';
 import { Errors } from '../../common/errors';
-import { cursorArgs, toPage } from '../../common/pagination';
+import { Page, cursorArgs, toPage } from '../../common/pagination';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { AuthContext, can } from '../access/auth-context';
 import { VISIBLE_ASSIGNMENT_STATUSES } from '../access/member-access';
 import { SettingsService } from '../settings/settings.service';
 import { CertificateAccessService, actorOf } from './certificate-access.service';
+import { CertificateTreeService } from './certificate-tree.service';
+import { canSelfApprove } from './certificate-workflow.service';
 import {
   CertificateValidity,
   DATA_REQUEST_KINDS,
@@ -24,6 +26,7 @@ import {
   utcDay,
 } from './certificate.logic';
 import { ComplianceQuery, ListCertificatesQuery, ListRequestsQuery } from './certificates.dto';
+import { escapeLike } from '../../common/utils/like';
 
 const OPEN = [...OPEN_REQUEST_STATUSES];
 const DATA_KINDS = [...DATA_REQUEST_KINDS];
@@ -32,6 +35,7 @@ const LIST_INCLUDE = {
   type: { select: { id: true, code: true, name: true, category: true, subjectKind: true, requiresDocument: true, allowMultiple: true } },
   vessel: { select: { id: true, code: true, name: true } },
   member: { select: { id: true, amcRef: true, firstName: true, lastName: true, rank: true } },
+  folder: { select: { id: true, name: true } },
   currentRevision: {
     select: { id: true, revisionNo: true, issuer: true, authority: true, issuedOn: true, validFrom: true, approvedAt: true },
   },
@@ -55,6 +59,7 @@ const DETAIL_INCLUDE = {
   },
   vessel: { select: { id: true, code: true, name: true, imoNumber: true } },
   member: { select: { id: true, amcRef: true, firstName: true, lastName: true, rank: true } },
+  folder: { select: { id: true, name: true } },
   revisions: { orderBy: { revisionNo: 'desc' } },
   requests: {
     orderBy: { createdAt: 'desc' },
@@ -66,6 +71,40 @@ const DETAIL_INCLUDE = {
 } satisfies Prisma.CertificateInclude;
 
 type ListRow = Prisma.CertificateGetPayload<{ include: typeof LIST_INCLUDE }>;
+
+interface UpcomingSegment {
+  where: Prisma.CertificateWhereInput;
+  orderBy: Prisma.CertificateOrderByWithRelationInput[];
+  /** Lignes du segment situées après le certificat-curseur */
+  after: (c: { id: string; currentExpiryOn: Date | null }) => Prisma.CertificateWhereInput;
+}
+
+/** Segments du tri « à échoir d'abord » : à venir (asc), expirés (desc), sans date (UI-08). */
+export function upcomingSegments(today: Date): UpcomingSegment[] {
+  return [
+    {
+      where: { currentExpiryOn: { gte: today } },
+      orderBy: [{ currentExpiryOn: 'asc' }, { id: 'asc' }],
+      after: (c) => ({ OR: [{ currentExpiryOn: { gt: c.currentExpiryOn! } }, { currentExpiryOn: c.currentExpiryOn, id: { gt: c.id } }] }),
+    },
+    {
+      where: { currentExpiryOn: { lt: today } },
+      orderBy: [{ currentExpiryOn: 'desc' }, { id: 'asc' }],
+      after: (c) => ({ OR: [{ currentExpiryOn: { lt: c.currentExpiryOn! } }, { currentExpiryOn: c.currentExpiryOn, id: { gt: c.id } }] }),
+    },
+    {
+      where: { currentExpiryOn: null },
+      orderBy: [{ id: 'asc' }],
+      after: (c) => ({ id: { gt: c.id } }),
+    },
+  ];
+}
+
+/** Segment d'un certificat dans le tri « à échoir d'abord ». */
+export function upcomingSegmentOf(expiryOn: Date | null, today: Date): number {
+  if (!expiryOn) return 2;
+  return expiryOn.getTime() >= today.getTime() ? 0 : 1;
+}
 
 export interface ComplianceCounts {
   total: number;
@@ -110,6 +149,7 @@ export class CertificatesService {
     private readonly access: AccessService,
     private readonly certAccess: CertificateAccessService,
     private readonly settings: SettingsService,
+    private readonly tree: CertificateTreeService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -119,7 +159,9 @@ export class CertificatesService {
   async list(ctx: AuthContext, q: ListCertificatesQuery) {
     const today = utcDay(new Date());
     const soon = await this.settings.get('certificates.expiringSoonDays');
-    const filters = this.listFilters(ctx, q, today, soon);
+    const folderIds = q.folderId && q.folderId !== 'none' ? await this.tree.subtreeIds(q.folderId) : null;
+    const filters = this.listFilters(ctx, q, today, soon, folderIds);
+    if (q.sort === 'upcoming') return this.listUpcoming(ctx, q, filters, today, soon);
 
     const sortField = q.sort === 'expiryOn' ? 'currentExpiryOn' : q.sort;
     const orderBy: Prisma.CertificateOrderByWithRelationInput[] = [
@@ -136,7 +178,10 @@ export class CertificatesService {
       this.prisma.certificate.findMany({ where, include: LIST_INCLUDE, orderBy, take: q.limit + 1 }),
       this.prisma.certificate.count({ where: { AND: filters } }),
     ]);
-    const page = toPage(rows, q, total);
+    return this.presentPage(toPage(rows, q, total), today, soon);
+  }
+
+  private async presentPage(page: Page<ListRow>, today: Date, soon: number) {
     const users = await this.userNames([
       ...page.items.map((r) => r.renewalOwnerId),
       ...page.items.flatMap((r) => r.requests.map((x) => x.requestedById)),
@@ -144,7 +189,46 @@ export class CertificatesService {
     return { ...page, expiringSoonDays: soon, items: page.items.map((r) => this.presentListItem(r, today, soon, users)) };
   }
 
-  private listFilters(ctx: AuthContext, q: ListCertificatesQuery, today: Date, soon: number): Prisma.CertificateWhereInput[] {
+  /**
+   * Tri « à échoir d'abord » (UI-08) : échéances à venir (la plus proche d'abord), puis expirés
+   * (le plus récent d'abord), puis sans date. Pagination par clé segment par segment.
+   */
+  private async listUpcoming(ctx: AuthContext, q: ListCertificatesQuery, filters: Prisma.CertificateWhereInput[], today: Date, soon: number) {
+    const segments = upcomingSegments(today);
+    let start = 0;
+    let after: Prisma.CertificateWhereInput | null = null;
+    if (q.cursor) {
+      const c = await this.prisma.certificate.findFirst({
+        where: { AND: [{ id: q.cursor }, this.certAccess.visibleWhere(ctx)] },
+        select: { id: true, currentExpiryOn: true },
+      });
+      if (!c) throw Errors.validation('Curseur de pagination invalide');
+      start = upcomingSegmentOf(c.currentExpiryOn, today);
+      after = segments[start].after(c);
+    }
+    const rows: ListRow[] = [];
+    for (let i = start; i < segments.length && rows.length <= q.limit; i++) {
+      const seg = segments[i];
+      rows.push(
+        ...(await this.prisma.certificate.findMany({
+          where: { AND: [...filters, seg.where, ...(i === start && after ? [after] : [])] },
+          include: LIST_INCLUDE,
+          orderBy: seg.orderBy,
+          take: q.limit + 1 - rows.length,
+        })),
+      );
+    }
+    const total = await this.prisma.certificate.count({ where: { AND: filters } });
+    return this.presentPage(toPage(rows, q, total), today, soon);
+  }
+
+  private listFilters(
+    ctx: AuthContext,
+    q: ListCertificatesQuery,
+    today: Date,
+    soon: number,
+    folderIds: string[] | null,
+  ): Prisma.CertificateWhereInput[] {
     const and: Prisma.CertificateWhereInput[] = [this.certAccess.visibleWhere(ctx)];
     and.push(q.archived ? { archivedAt: { not: null } } : { archivedAt: null });
     if (!q.archived && !q.includeAbandoned && q.hasCurrentRevision === undefined) {
@@ -185,6 +269,8 @@ export class CertificatesService {
     }
     if (q.typeId) and.push({ typeId: q.typeId });
     if (q.category) and.push({ type: { category: q.category } });
+    if (q.folderId === 'none') and.push({ folderId: null });
+    else if (folderIds) and.push({ folderId: { in: folderIds } });
     if (q.validity?.length) and.push({ OR: q.validity.map((v) => this.validityWhere(v, today, soon)) });
     if (q.expiringWithinDays !== undefined) {
       and.push({ currentExpiryKind: 'DATED', currentExpiryOn: { gte: today, lte: addDays(today, q.expiringWithinDays) } });
@@ -202,7 +288,7 @@ export class CertificatesService {
     }
     if (q.hasCurrentRevision !== undefined) and.push({ currentRevisionId: q.hasCurrentRevision ? { not: null } : null });
     if (q.search) {
-      const s = q.search;
+      const s = escapeLike(q.search);
       and.push({
         OR: [
           { currentNumber: { contains: s, mode: 'insensitive' } },
@@ -271,6 +357,7 @@ export class CertificatesService {
       memberId: r.memberId,
       subject: { label: subjectLabel(r), vessel: r.vessel, member: r.member },
       type: r.type,
+      folder: r.folder,
       hasCurrentRevision: !!r.currentRevisionId,
       currentNumber: r.currentNumber,
       currentExpiryKind: r.currentExpiryKind,
@@ -420,7 +507,9 @@ export class CertificatesService {
     const files = new Map(
       (await this.prisma.storedFile.findMany({ where: { id: { in: visibleAttachments.map((a) => a.fileId) } } })).map((f) => [f.id, f]),
     );
+    const cancellations = await this.cancellationsOf(visibleRequests.filter((r) => r.status === 'CANCELLED').map((r) => r.id));
     const users = await this.userNames([
+      ...[...cancellations.values()].map((c) => c.actorId),
       cert.createdById,
       cert.renewalOwnerId,
       cert.archivedById,
@@ -483,6 +572,8 @@ export class CertificatesService {
       decidedAt: r.decidedAt,
       decisionComment: r.decisionComment,
       cancelReason: r.cancelReason,
+      // Auteur réel de l'annulation (demandeur, supervision ou automatique — CRT-11)
+      cancellation: r.status === 'CANCELLED' ? this.presentCancellation(cancellations.get(r.id), r.requestedById, who) : null,
       duplicatedFromId: r.duplicatedFromId,
       attachmentId: r.attachmentId,
       escalatedAt: r.escalatedAt,
@@ -538,6 +629,7 @@ export class CertificatesService {
         reminderPolicy: cert.type.reminderPolicy,
         validatorsConfigured: validators.length,
       },
+      folder: cert.folder,
       validity,
       validityLabel: validity ? VALIDITY_LABELS[validity] : null,
       daysToExpiry: current ? daysToExpiry(current.expiryKind, current.expiryOn, today) : null,
@@ -574,21 +666,28 @@ export class CertificatesService {
         canApprove: requests.some((r) => r.canDecide && r.kind !== 'ATTACHMENT'),
         canApproveAttachment: requests.some((r) => r.canDecide && r.kind === 'ATTACHMENT'),
         canEditRequest: !!openData && active && openData.requestedById === ctx.userId && can(ctx, 'certificates.edit'),
+        // Publication directe : vaut soumission (CRT-09)
         canSubmit:
-          !!openData && active && openData.requestedById === ctx.userId && openData.status !== 'PENDING_APPROVAL' && can(ctx, 'certificates.submit'),
+          !!openData &&
+          active &&
+          openData.requestedById === ctx.userId &&
+          openData.status !== 'PENDING_APPROVAL' &&
+          (can(ctx, 'certificates.submit') || canSelfApprove(ctx, openData.kind)),
         canCancelRequest: canCancel(openData),
         canSubmitAttachment:
           !!openAttachment &&
           active &&
           openAttachment.requestedById === ctx.userId &&
           openAttachment.status !== 'PENDING_APPROVAL' &&
-          can(ctx, 'certificates.submit'),
+          (can(ctx, 'certificates.submit') || canSelfApprove(ctx, 'ATTACHMENT')),
         canCancelAttachmentRequest: canCancel(openAttachment),
         canRenew: active && !!current && !openData && can(ctx, 'certificates.create'),
         canCorrect: active && !!current && !openData && (can(ctx, 'certificates.create') || can(ctx, 'certificates.edit')),
         canAddAttachment: active && !!current && !openAttachment && (can(ctx, 'certificates.create') || can(ctx, 'certificates.edit')),
         canManageRenewal: active && can(ctx, 'certificates.renewal.manage'),
         canArchive: active && can(ctx, 'certificates.archive'),
+        canFile: can(ctx, 'certificates.folders.manage'),
+        canSelfApproveRenewal: canSelfApprove(ctx, 'RENEWAL'),
         canPreviewCurrent: !!official?.access.preview,
         canDownloadCurrent: !!official?.access.download,
         canDownloadArchived: can(ctx, 'certificates.download_archived'),
@@ -684,6 +783,32 @@ export class CertificatesService {
         };
       }),
     };
+  }
+
+  /**
+   * Auteur des annulations, lu dans le journal d'audit (aucune colonne dédiée) : demandeur,
+   * supervision (validateur / administrateur) ou annulation automatique par le workflow.
+   */
+  private async cancellationsOf(requestIds: string[]): Promise<Map<string, { actorId: string | null; automatic: boolean }>> {
+    if (!requestIds.length) return new Map();
+    const events = await this.prisma.auditEvent.findMany({
+      where: { entityType: 'certificate_request', entityId: { in: requestIds }, action: { startsWith: 'certificate.request_cancelled' }, result: 'SUCCESS' },
+      select: { entityId: true, actorId: true, metadata: true },
+      orderBy: { occurredAt: 'asc' },
+    });
+    return new Map(
+      events.map((e) => [e.entityId!, { actorId: e.actorId, automatic: (e.metadata as { automatic?: boolean } | null)?.automatic === true }]),
+    );
+  }
+
+  private presentCancellation(
+    c: { actorId: string | null; automatic: boolean } | undefined,
+    requestedById: string,
+    who: (userId: string | null) => { id: string; displayName: string | null } | null,
+  ) {
+    if (!c) return { by: null, mode: 'UNKNOWN' as const };
+    if (c.automatic) return { by: null, mode: 'AUTOMATIC' as const };
+    return { by: who(c.actorId), mode: c.actorId === requestedById ? ('REQUESTER' as const) : ('SUPERVISOR' as const) };
   }
 
   private async userNames(ids: (string | null | undefined)[]): Promise<Map<string, string>> {

@@ -93,10 +93,12 @@ export class VariancesService {
     data: Prisma.VarianceUncheckedUpdateManyInput,
     metadata: Record<string, unknown>,
     allowSameStatus = false,
+    guard?: (v: { po: { number: string; status: string } }) => void,
   ) {
     return this.prisma.$transaction(async (tx) => {
       const v = await this.find(ctx, id, tx);
       if (!(allowSameStatus && v.status === to)) assertTransition(VARIANCE_TRANSITIONS, v.status, to, 'Écart');
+      guard?.(v);
       const res = await tx.variance.updateMany({ where: { id, status: v.status }, data: { ...data, status: to } });
       if (!res.count) throw Errors.staleVersion();
       await this.core.audit(ctx, { action, entityType: 'variance', entityId: id, vesselId: v.po.vesselId, before: { status: v.status, assignedToId: v.assignedToId }, after: { status: to, ...data }, metadata }, tx);
@@ -275,8 +277,14 @@ export class VariancesService {
     return { complementaryOrder: { id: result.complementary.id, number: result.complementary.number }, issued: issued?.issued ?? false, message: issued?.message ?? null };
   }
 
+  /** Réouverture : jamais sur un BC clôturé ou annulé (l'écart ne pourrait plus être traité — audit ACH-08). */
   async reopen(ctx: AuthContext, id: string, comment?: string | null) {
-    return (await this.transition(ctx, id, 'IN_PROGRESS', 'variance.reopened', { resolvedAt: null }, { comment })).variance;
+    const guard = (v: { po: { number: string; status: string } }) => {
+      if (v.po.status === 'CLOSED' || v.po.status === 'CANCELLED') {
+        throw Errors.invalidState(`BC ${v.po.number} ${v.po.status === 'CLOSED' ? 'clôturé' : 'annulé'} : l’écart ne peut plus être rouvert`, { poStatus: v.po.status });
+      }
+    };
+    return (await this.transition(ctx, id, 'IN_PROGRESS', 'variance.reopened', { resolvedAt: null }, { comment }, false, guard)).variance;
   }
 
   /**

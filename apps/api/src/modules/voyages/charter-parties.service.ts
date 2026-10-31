@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { CharterParty, CpVersion, Prisma } from '@prisma/client';
 import { Errors } from '../../common/errors';
 import { cursorArgs, toPage } from '../../common/pagination';
+import { creatorLabels } from '../../common/utils/creators';
 import { Db, PrismaService } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { AuthContext, can, vesselWhere } from '../access/auth-context';
@@ -17,11 +18,13 @@ import {
   UpdateCharterPartyDto,
 } from './charter-parties.dto';
 import { OWNER_CP_VERSION, canAccessCp, cpScopeWhere, filterCpAudience, onboardMasters, userLabels } from './voyages.common';
+import { escapeLike } from '../../common/utils/like';
 import {
   CP_CONTRACT_FIELDS,
   CpContractField,
   buildCpClauses,
   clausesToCpData,
+  cpReferenceKey,
   diffClauses,
   opposableVersion,
   pendingVersion,
@@ -102,9 +105,9 @@ export class CharterPartiesService implements OnModuleInit {
         q.search
           ? {
               OR: [
-                { reference: { contains: q.search, mode: 'insensitive' } },
-                { charterer: { contains: q.search, mode: 'insensitive' } },
-                { owner: { contains: q.search, mode: 'insensitive' } },
+                { reference: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { charterer: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { owner: { contains: escapeLike(q.search), mode: 'insensitive' } },
               ],
             }
           : {},
@@ -124,7 +127,9 @@ export class CharterPartiesService implements OnModuleInit {
       }),
       this.prisma.charterParty.count({ where }),
     ]);
-    return toPage(rows, q, total);
+    const page = toPage(rows, q, total);
+    const creators = await creatorLabels(this.prisma, page.items.map((cp) => cp.createdById));
+    return { ...page, items: page.items.map((cp) => ({ ...cp, createdBy: creators.get(cp.createdById) ?? null })) };
   }
 
   async get(ctx: AuthContext, id: string) {
@@ -136,9 +141,10 @@ export class CharterPartiesService implements OnModuleInit {
         voyages: { where: vesselWhere(ctx) as Prisma.VoyageWhereInput, select: { id: true, reference: true, status: true, vesselId: true } },
       },
     });
-    const versions = await this.listVersions(ctx, id);
+    const [versions, creators] = await Promise.all([this.listVersions(ctx, id), creatorLabels(this.prisma, [cp.createdById])]);
     return {
       ...cp,
+      createdBy: creators.get(cp.createdById) ?? null,
       versions,
       opposableVersion: opposableVersion(versions),
       pendingVersion: pendingVersion(versions),
@@ -206,7 +212,7 @@ export class CharterPartiesService implements OnModuleInit {
         status: before.status,
       });
     }
-    if (dto.reference && dto.reference !== before.reference) await this.assertReferenceFree(dto.reference);
+    if (dto.reference && dto.reference !== before.reference) await this.assertReferenceFree(dto.reference, id);
     if (dto.vesselId !== undefined && dto.vesselId !== before.vesselId) {
       if (dto.vesselId) {
         this.access.assertVesselAccess(ctx, dto.vesselId);
@@ -261,9 +267,15 @@ export class CharterPartiesService implements OnModuleInit {
     });
   }
 
-  private async assertReferenceFree(reference: string) {
-    const dup = await this.prisma.charterParty.findUnique({ where: { reference }, select: { id: true } });
-    if (dup) throw Errors.duplicate('Une Charter Party avec cette référence existe déjà', { field: 'reference' });
+  /** Unicité sans casse ni espaces (audit FLT-16) : les références historiques ne sont pas réécrites. */
+  private async assertReferenceFree(reference: string, excludeId?: string) {
+    const key = cpReferenceKey(reference);
+    const dup = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT id FROM charter_parties
+      WHERE regexp_replace(upper(reference), '[[:space:]]', '', 'g') = ${key}
+        ${excludeId ? Prisma.sql`AND id <> ${excludeId}::uuid` : Prisma.empty}
+      LIMIT 1`);
+    if (dup.length) throw Errors.duplicate('Une Charter Party avec cette référence existe déjà', { field: 'reference' });
   }
 
   // ---------------------------------------------------------------------------

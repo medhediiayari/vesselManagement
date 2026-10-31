@@ -1,4 +1,5 @@
 import type { StoredFileDto } from '@/lib/api';
+import type { CreatorLabel } from '@/components/amc/created-by';
 
 /** DTO Voyages / Charter Parties tels que renvoyés par l'API (dates ISO, décimaux en chaîne). */
 
@@ -41,6 +42,9 @@ export interface VoyageBase {
   notes: string | null;
   closedAt: string | null;
   lockVersion: number;
+  createdById: string;
+  /** Auteur (nom + rôles) : affiché partout pour savoir qui a créé le voyage avant d'y toucher. */
+  createdBy?: CreatorLabel | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -279,6 +283,29 @@ export interface CertificateCheck {
     type: { code: string; name: string; category: string };
     flag: 'EXPIRED' | 'EXPIRES_BEFORE_VOYAGE_END' | 'EXPIRY_UNKNOWN';
   }[];
+  /** Volet équipage : marins à bord ou prévus pendant le voyage (périmètre de l'utilisateur). */
+  crew?:
+    | { available: false; reason: string }
+    | {
+        available: true;
+        voyageStart: string | null;
+        checkedMembers: number;
+        counts: { expired: number; expiringBeforeVoyageEnd: number; expiryUnknown: number };
+        members: {
+          memberId: string;
+          name: string;
+          rank: string;
+          assignmentStatus: 'PLANNED' | 'ONBOARD' | 'COMPLETED';
+          items: {
+            id: string;
+            currentNumber: string | null;
+            currentExpiryKind: 'DATED' | 'UNLIMITED' | 'UNKNOWN' | null;
+            currentExpiryOn: string | null;
+            type: { code: string; name: string; category: string };
+            flag: 'EXPIRED' | 'EXPIRES_BEFORE_VOYAGE_END' | 'EXPIRY_UNKNOWN';
+          }[];
+        }[];
+      };
 }
 
 // -----------------------------------------------------------------------------
@@ -325,6 +352,7 @@ export interface CharterPartyBase {
   status: CpStatus;
   currentVersionId: string | null;
   createdById: string;
+  createdBy?: CreatorLabel | null;
   createdAt: string;
   updatedAt: string;
 }

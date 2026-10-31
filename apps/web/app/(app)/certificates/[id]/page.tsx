@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Archive, ChevronDown, FilePlus2, Gavel, Info, PenLine, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, Archive, ChevronDown, FilePlus2, Folder, Gavel, Info, PenLine, RefreshCw, X } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
@@ -24,6 +24,7 @@ import { InlineCertificatePreview } from '@/components/certificates/document-pre
 import { certKeys, fmtDays, fmtExpiry, useRefreshCertificates } from '@/components/certificates/lib';
 import { RenewalPanel } from '@/components/certificates/renewal-panel';
 import { RequestCard } from '@/components/certificates/request-card';
+import { FileCertificateButton } from '@/components/certificates/tree';
 import {
   ArchivedBadge,
   AttachmentStatusBadge,
@@ -228,6 +229,11 @@ function CertificateDetailView() {
               </Badge>
             )}
             {c.archivedAt && <ArchivedBadge />}
+            {c.folder && (
+              <Badge tone="neutral" icon={false}>
+                <Folder className="h-3 w-3" aria-hidden /> {c.folder.name}
+              </Badge>
+            )}
             <ValidityBadge validity={c.validity} expiryOn={rev?.expiryOn} />
             <RenewalBadge status={c.renewal.status} hideIdle />
             <DocumentBadge hasCurrentRevision={!!rev} documentMissing={c.documentMissing} documentRequired={c.documentRequired} pendingAttachment={!!openAttachment} />
@@ -251,6 +257,7 @@ function CertificateDetailView() {
                 <PenLine className="h-4 w-4" aria-hidden /> Corriger
               </Button>
             )}
+            {p.canFile && <FileCertificateButton certificateId={c.id} folder={c.folder} size="md" />}
             {p.canArchive && (
               <Button
                 variant="secondary"

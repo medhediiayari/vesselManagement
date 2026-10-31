@@ -788,7 +788,7 @@ export function DocumentExplorer({
             open={dialog === 'archive'}
             onOpenChange={(o) => !o && setDialog(null)}
             title={`Archiver « ${current.name} » ?`}
-            description="Le dossier, ses sous-dossiers et leurs documents sont archivés (aucune suppression). Une restauration complète ou sélective reste possible."
+            description="Le dossier, ses sous-dossiers et leurs documents sont archivés (aucune suppression) ; les versions en attente sont annulées et les partages révoqués. Une restauration complète ou sélective reste possible : les documents jamais approuvés reviennent alors en brouillon."
             confirmLabel="Archiver"
             tone="danger"
             requireReason

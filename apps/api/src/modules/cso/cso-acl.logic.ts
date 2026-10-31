@@ -7,6 +7,9 @@
  *                    ∧ ACL ressource (héritée du dossier parent jusqu'à une rupture d'héritage)
  *                    ∧ implications (toute action exige « view » ; download_archived exige view_archived)
  *
+ * Visibilité des contenants : tous les dossiers au-dessus de la ressource doivent être visibles
+ * (une rupture d'héritage ne rend jamais visible un élément situé sous un dossier caché — CSO-02).
+ *
  * ACL (chaîne document -> dossier -> ancêtres, arrêt APRÈS un nœud dont inheritAcl = false) :
  *  - un DENY visant l'un des principaux de l'utilisateur pour l'action => refus (prioritaire) ;
  *  - si la chaîne contient au moins un ALLOW mentionnant l'action => mode restrictif :
@@ -169,11 +172,37 @@ function shareGrant(input: AccessInput, entries: AclEntryLike[], shares: ShareGr
   };
 }
 
+/**
+ * Lisibilité des dossiers contenants (CSO-02) : chaque dossier au-dessus de la ressource (chain[1..])
+ * doit être visible selon SA propre chaîne d'héritage. Sans cela, une rupture d'héritage rendrait un
+ * sous-dossier (ou un document) accessible sous un parent caché, par accès direct ou par la recherche.
+ * Seule exception : une règle « Autoriser view » posée sur le DOCUMENT lui-même et nommant l'utilisateur
+ * (exception compatible au niveau document) l'emporte sur une liste restrictive d'un dossier — jamais
+ * sur un refus explicite.
+ */
+export function ancestorsReadable(input: Pick<AccessInput, 'chain' | 'principals' | 'target'>): boolean {
+  const namedOnDocument = input.target === 'document' && !!input.chain[0] && aclDecision(input.chain[0].entries, 'view', input.principals) === 'ALLOW';
+  for (let i = 1; i < input.chain.length; i++) {
+    const d = aclDecision(collectEntries(input.chain.slice(i)), 'view', input.principals);
+    if (d === 'DENY' || (d === 'NOT_LISTED' && !namedOnDocument)) return false;
+  }
+  return true;
+}
+
+/**
+ * Rupture d'héritage sans aucune règle « Autoriser » sur view : la visibilité retomberait sur la
+ * seule permission module (tous les lecteurs), contrairement à ce qu'attend l'utilisateur (CSO-02).
+ */
+export function breaksWithoutViewRule(inheritAcl: boolean, entries: Pick<AclEntryLike, 'actions' | 'effect'>[]): boolean {
+  return !inheritAcl && !entries.some((e) => e.effect === 'ALLOW' && e.actions.includes('view'));
+}
+
 /** Actions effectives d'un utilisateur sur une ressource. */
 export function evaluateAccess(input: AccessInput): ActionMap {
   const entries = collectEntries(input.chain);
   const shares = input.target === 'document' ? input.shares ?? [] : [];
-  const result = evaluateWithoutShares(input, entries);
+  // Le partage reste seul capable d'ouvrir un document situé sous un dossier invisible
+  const result = ancestorsReadable(input) ? evaluateWithoutShares(input, entries) : emptyActions();
   if (shares.length) Object.assign(result, shareGrant(input, entries, shares, result));
 
   if (input.superAdmin && input.target === 'folder' && input.inScope) {

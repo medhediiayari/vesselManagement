@@ -1,3 +1,4 @@
+import { isExistingDate } from '../../common/pagination';
 import { ExcelService } from '../documents/excel.service';
 import {
   DUPLICATE_THRESHOLD,
@@ -7,6 +8,8 @@ import {
   cleanText,
   idKey,
   identityKeys,
+  isKnownCountry,
+  memberDataIssues,
   nameKey,
   normalizeRef,
   sameValue,
@@ -513,7 +516,8 @@ const NATIONALITY_INDEX: Map<string, string> = (() => {
 /** Nationalité -> ISO 3166-1 alpha-2 (contrainte CHECK en base). */
 export function resolveCountry(text: string): string | null {
   const k = idKey(text);
-  if (/^[A-Z]{2}$/.test(k)) return k;
+  // « XX » n'est pas un pays : ignoré avec avertissement plutôt qu'importé (audit FLT-13)
+  if (/^[A-Z]{2}$/.test(k)) return isKnownCountry(k) ? k : null;
   return NATIONALITY_INDEX.get(k) ?? null;
 }
 
@@ -891,16 +895,17 @@ export function validateNormalizedMember(member: NormalizedMember): RowIssue[] {
     const v = member[field];
     if (typeof v === 'string' && v.length > max) errors.push({ field, message: `${field} : ${max} caractères maximum` });
   }
+  let datesOk = true;
   for (const f of ['birthDate', 'passportExpiry', 'seamanBookExpiry'] as const) {
     const v = member[f];
-    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) errors.push({ field: f, message: `${f} : date AAAA-MM-JJ attendue` });
+    if (v && !isExistingDate(v)) {
+      datesOk = false;
+      errors.push({ field: f, message: `${f} : date AAAA-MM-JJ existante attendue` });
+    }
   }
-  if (member.birthDate && member.birthDate > new Date().toISOString().slice(0, 10)) {
-    errors.push({ field: 'birthDate', message: 'Date de naissance dans le futur' });
-  }
-  for (const f of ['nationality', 'passportCountry'] as const) {
-    const v = member[f];
-    if (v && !/^[A-Z]{2}$/.test(v)) errors.push({ field: f, message: `${f} : code pays ISO à 2 lettres attendu` });
+  // Règles partagées avec la saisie manuelle (audit FLT-13)
+  for (const issue of memberDataIssues(datesOk ? member : { nationality: member.nationality, passportCountry: member.passportCountry })) {
+    errors.push({ field: issue.field, message: issue.message });
   }
   return errors;
 }

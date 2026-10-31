@@ -106,6 +106,16 @@ export function poOwnFilter(ctx: AuthContext): Prisma.PurchaseOrderWhereInput {
   return can(ctx, 'pr.view_all') ? {} : { lines: { some: { allocations: { some: { prLine: { pr: { requesterId: ctx.userId } } } } } } };
 }
 
+/** RFQ consultant au moins une ligne d'une PR de l'utilisateur (devis : via leur RFQ). */
+export function rfqOwnFilter(ctx: AuthContext): Prisma.RfqWhereInput {
+  return can(ctx, 'pr.view_all') ? {} : { lines: { some: { prLine: { pr: { requesterId: ctx.userId } } } } };
+}
+
+/** Factures rattachées à au moins un BC visible (BC alloué à une PR de l'utilisateur). */
+export function invoiceOwnFilter(ctx: AuthContext): Prisma.InvoiceWhereInput {
+  return can(ctx, 'pr.view_all') ? {} : { orders: { some: { po: poOwnFilter(ctx) } } };
+}
+
 /**
  * Socle partagé du module Achats : scope navire, verrous, transactions sérialisables, pièces jointes,
  * rapprochement (vue v_po_line_balance), recalcul des statuts PR / BC, détection des écarts de solde
@@ -151,6 +161,26 @@ export class PurchasingCore implements OnModuleInit {
     if (!n) throw Errors.notFound('Bon de commande');
   }
 
+  rfqOwnWhere(ctx: AuthContext): Prisma.RfqWhereInput {
+    return rfqOwnFilter(ctx);
+  }
+
+  invoiceOwnWhere(ctx: AuthContext): Prisma.InvoiceWhereInput {
+    return invoiceOwnFilter(ctx);
+  }
+
+  async assertRfqVisible(ctx: AuthContext, rfqId: string, db: Db = this.prisma): Promise<void> {
+    if (!this.ownPrOnly(ctx)) return;
+    const n = await db.rfq.count({ where: { id: rfqId, ...this.rfqOwnWhere(ctx) } });
+    if (!n) throw Errors.notFound('RFQ');
+  }
+
+  async assertInvoiceVisible(ctx: AuthContext, invoiceId: string, db: Db = this.prisma): Promise<void> {
+    if (!this.ownPrOnly(ctx)) return;
+    const n = await db.invoice.count({ where: { id: invoiceId, ...this.invoiceOwnWhere(ctx) } });
+    if (!n) throw Errors.notFound('Facture');
+  }
+
   // ---------------------------------------------------------------------------
   // Resolvers d'accès fichiers (download = même permission que view : pas de permission distincte en Achats)
   // ---------------------------------------------------------------------------
@@ -161,6 +191,8 @@ export class PurchasingCore implements OnModuleInit {
       if (!att) throw Errors.notFound('Pièce jointe');
       this.assertAnyPermission(ctx, ATTACHMENT_VIEW_PERMISSIONS[att.entityType]);
       this.access.assertVesselAccess(ctx, att.vesselId);
+      // Cloisonnement « ses propres PR » sur l'entité porteuse (audit ACH-01)
+      await this.entityVessel(ctx, att.entityType, att.entityId);
       return { module: 'purchasing', entityType: ENTITY_AUDIT_TYPE[att.entityType], entityId: att.entityId, vesselId: att.vesselId, downloadName: file.originalName };
     });
     this.registry.register(OWNER_PO_PDF, async (ctx, file) => {
@@ -168,13 +200,15 @@ export class PurchasingCore implements OnModuleInit {
       const po = await this.prisma.purchaseOrder.findUnique({ where: { id: file.ownerId! }, select: { id: true, vesselId: true } });
       if (!po) throw Errors.notFound('Bon de commande');
       this.access.assertVesselAccess(ctx, po.vesselId);
+      await this.assertPoVisible(ctx, po.id);
       return { module: 'purchasing', entityType: 'purchase_order', entityId: po.id, vesselId: po.vesselId, downloadName: file.originalName };
     });
     this.registry.register(OWNER_PR_PDF, async (ctx, file) => {
       this.access.assertCan(ctx, 'pr.view');
-      const pr = await this.prisma.purchaseRequest.findUnique({ where: { id: file.ownerId! }, select: { id: true, vesselId: true } });
+      const pr = await this.prisma.purchaseRequest.findUnique({ where: { id: file.ownerId! }, select: { id: true, vesselId: true, requesterId: true } });
       if (!pr) throw Errors.notFound('Purchase Request');
       this.access.assertVesselAccess(ctx, pr.vesselId);
+      if (this.ownPrOnly(ctx) && pr.requesterId !== ctx.userId) throw Errors.notFound('Purchase Request');
       return { module: 'purchasing', entityType: 'purchase_request', entityId: pr.id, vesselId: pr.vesselId, downloadName: file.originalName };
     });
     this.registry.register(OWNER_RFQ_PDF, async (ctx, file) => {
@@ -182,13 +216,15 @@ export class PurchasingCore implements OnModuleInit {
       const rs = await this.prisma.rfqSupplier.findUnique({ where: { id: file.ownerId! }, select: { rfq: { select: { id: true, vesselId: true } } } });
       if (!rs) throw Errors.notFound('RFQ');
       this.access.assertVesselAccess(ctx, rs.rfq.vesselId);
+      await this.assertRfqVisible(ctx, rs.rfq.id);
       return { module: 'purchasing', entityType: 'rfq', entityId: rs.rfq.id, vesselId: rs.rfq.vesselId, downloadName: file.originalName };
     });
     this.registry.register(OWNER_RECEIPT_PDF, async (ctx, file) => {
       this.access.assertCan(ctx, 'receiving.view');
-      const r = await this.prisma.goodsReceipt.findUnique({ where: { id: file.ownerId! }, select: { id: true, vesselId: true } });
+      const r = await this.prisma.goodsReceipt.findUnique({ where: { id: file.ownerId! }, select: { id: true, vesselId: true, poId: true } });
       if (!r) throw Errors.notFound('Réception');
       this.access.assertVesselAccess(ctx, r.vesselId);
+      await this.assertPoVisible(ctx, r.poId);
       return { module: 'purchasing', entityType: 'goods_receipt', entityId: r.id, vesselId: r.vesselId, downloadName: file.originalName };
     });
   }
@@ -259,6 +295,7 @@ export class PurchasingCore implements OnModuleInit {
     const rfq = await db.rfq.findUnique({ where: { id } });
     if (!rfq) throw Errors.notFound('RFQ');
     this.access.assertVesselAccess(ctx, rfq.vesselId);
+    await this.assertRfqVisible(ctx, rfq.id, db);
     return rfq;
   }
 
@@ -288,37 +325,67 @@ export class PurchasingCore implements OnModuleInit {
   // Pièces jointes polymorphes (owner type `purchasing_attachment`)
   // ---------------------------------------------------------------------------
 
-  /** Navire de rattachement d'une entité Achats + contrôle de scope. */
+  /**
+   * Navire de rattachement d'une entité Achats + contrôle de scope, puis filtre « ses propres PR » (sans
+   * pr.view_all : PR dont on est demandeur, BC / BL / réceptions / écarts / factures qui en découlent, RFQ et
+   * devis qui les consultent) — 404 générique, comme pour l'entité elle-même (audit ACH-01).
+   */
   async entityVessel(ctx: AuthContext, entityType: PurchasingEntityType, entityId: string, db: Db = this.prisma): Promise<string> {
     let vesselId: string | null | undefined;
+    let ownCheck: (() => Promise<void>) | null = null;
+    const viaPo = (poId: string | undefined) => async () => {
+      if (!poId) throw Errors.notFound(ENTITY_AUDIT_TYPE[entityType]);
+      await this.assertPoVisible(ctx, poId, db);
+    };
     switch (entityType) {
-      case 'PR':
-        vesselId = (await db.purchaseRequest.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+      case 'PR': {
+        const pr = await db.purchaseRequest.findUnique({ where: { id: entityId }, select: { vesselId: true, requesterId: true } });
+        vesselId = pr?.vesselId;
+        ownCheck = async () => {
+          if (this.ownPrOnly(ctx) && pr?.requesterId !== ctx.userId) throw Errors.notFound('Purchase Request');
+        };
         break;
+      }
       case 'RFQ':
         vesselId = (await db.rfq.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+        ownCheck = () => this.assertRfqVisible(ctx, entityId, db);
         break;
-      case 'QUOTATION':
-        vesselId = (await db.quotation.findUnique({ where: { id: entityId }, select: { rfq: { select: { vesselId: true } } } }))?.rfq.vesselId;
+      case 'QUOTATION': {
+        const q = await db.quotation.findUnique({ where: { id: entityId }, select: { rfqId: true, rfq: { select: { vesselId: true } } } });
+        vesselId = q?.rfq.vesselId;
+        ownCheck = () => this.assertRfqVisible(ctx, q!.rfqId, db);
         break;
+      }
       case 'PURCHASE_ORDER':
         vesselId = (await db.purchaseOrder.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+        ownCheck = viaPo(entityId);
         break;
-      case 'DELIVERY_NOTE':
-        vesselId = (await db.deliveryNote.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+      case 'DELIVERY_NOTE': {
+        const dn = await db.deliveryNote.findUnique({ where: { id: entityId }, select: { vesselId: true, poId: true } });
+        vesselId = dn?.vesselId;
+        ownCheck = viaPo(dn?.poId);
         break;
-      case 'GOODS_RECEIPT':
-        vesselId = (await db.goodsReceipt.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+      }
+      case 'GOODS_RECEIPT': {
+        const r = await db.goodsReceipt.findUnique({ where: { id: entityId }, select: { vesselId: true, poId: true } });
+        vesselId = r?.vesselId;
+        ownCheck = viaPo(r?.poId);
         break;
-      case 'VARIANCE':
-        vesselId = (await db.variance.findUnique({ where: { id: entityId }, select: { po: { select: { vesselId: true } } } }))?.po.vesselId;
+      }
+      case 'VARIANCE': {
+        const v = await db.variance.findUnique({ where: { id: entityId }, select: { poId: true, po: { select: { vesselId: true } } } });
+        vesselId = v?.po.vesselId;
+        ownCheck = viaPo(v?.poId);
         break;
+      }
       case 'INVOICE':
         vesselId = (await db.invoice.findUnique({ where: { id: entityId }, select: { vesselId: true } }))?.vesselId;
+        ownCheck = () => this.assertInvoiceVisible(ctx, entityId, db);
         break;
     }
     if (!vesselId) throw Errors.notFound(ENTITY_AUDIT_TYPE[entityType]);
     this.access.assertVesselAccess(ctx, vesselId);
+    if (ownCheck) await ownCheck();
     return vesselId;
   }
 

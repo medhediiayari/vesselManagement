@@ -99,7 +99,7 @@ export function ZipDialog({ open, onOpenChange, request }: { open: boolean; onOp
               <Archive className="h-4 w-4 text-ok" aria-hidden />
               Archive prête : {j.itemCount ?? 0} fichier(s).
             </p>
-            {excluded > 0 && <Notice tone="warn">{excluded} élément(s) exclu(s) faute de droits.</Notice>}
+            {excluded > 0 && <Notice tone="warn">{excluded} fichier(s) non inclus : droit de téléchargement manquant ou fichier indisponible.</Notice>}
             {j.status === 'PARTIALLY_FAILED' && <Notice tone="warn">Certains fichiers n&apos;ont pas pu être ajoutés.</Notice>}
           </>
         )}

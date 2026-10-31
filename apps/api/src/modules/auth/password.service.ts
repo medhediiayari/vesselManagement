@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import { Errors } from '../../common/errors';
+import type { Tx } from '../../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 
 /** Paramètres Argon2id conformes aux recommandations OWASP (m=19 MiB, t=2, p=1). */
@@ -35,6 +36,11 @@ export class PasswordService {
     await this.verify(await this.dummyHash, password);
   }
 
+  /** Règles affichées avant saisie (ADM-21) : mêmes valeurs que `assertPolicy`. */
+  async policy() {
+    return { minLength: await this.settings.get('auth.passwordMinLength'), maxLength: 256, minClasses: 3 };
+  }
+
   /** Politique de mot de passe (CDC §1.2) : longueur minimale configurable + règles de base. */
   async assertPolicy(password: string, context: { username: string; email?: string | null }): Promise<void> {
     const min = await this.settings.get('auth.passwordMinLength');
@@ -49,4 +55,9 @@ export class PasswordService {
     if (local && local.length >= 3 && lower.includes(local)) problems.push("ne pas contenir l'adresse e-mail");
     if (problems.length) throw Errors.validation('Mot de passe non conforme', { rules: problems });
   }
+}
+
+/** Invalide tous les liens de réinitialisation encore utilisables d'un compte (ADM-03). */
+export async function invalidateResetTokens(tx: Tx, userId: string): Promise<void> {
+  await tx.passwordResetToken.updateMany({ where: { userId, usedAt: null }, data: { usedAt: new Date() } });
 }

@@ -348,17 +348,35 @@ export function PdfActions({ path, title, label = 'PDF' }: { path: string; title
 
 export { DownloadButton };
 
-/** Export Excel (reports.export) : lien signé demandé au clic avec les filtres courants. */
-export function ExportButton({ path, query, label = 'Exporter (Excel)' }: { path: string; query: Record<string, string | undefined>; label?: string }) {
+export type ExportLink = { url: string; fileName: string; itemCount: number };
+
+/**
+ * Export Excel (reports.export) : lien signé demandé au clic avec les filtres courants.
+ * `load` remplace l'appel GET `path` (ex. POST /exports des modules hors Achats).
+ */
+export function ExportButton({
+  path,
+  query,
+  load,
+  label = 'Exporter (Excel)',
+  title,
+}: {
+  path?: string;
+  query?: Record<string, string | undefined>;
+  load?: () => Promise<ExportLink>;
+  label?: string;
+  title?: string;
+}) {
   const [busy, setBusy] = useState(false);
   return (
     <Button
       variant="secondary"
       loading={busy}
+      title={title}
       onClick={async () => {
         setBusy(true);
         try {
-          const link = await api.get<{ url: string; fileName: string; itemCount: number }>(path, { query });
+          const link = load ? await load() : await api.get<ExportLink>(path!, { query });
           const a = document.createElement('a');
           a.href = link.url;
           a.rel = 'noopener';

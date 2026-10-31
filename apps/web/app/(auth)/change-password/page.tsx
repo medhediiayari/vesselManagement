@@ -1,16 +1,27 @@
 'use client';
 
 import { useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { toast } from 'sonner';
 import { ApiError, api } from '@/lib/api';
+import { useMe } from '@/lib/session';
+import { passwordRulesHint, usePasswordPolicy } from '@/components/amc/password-rules';
 import { Button } from '@/components/ui/button';
 import { TextField } from '@/components/ui/field';
 
-/** Remplacement obligatoire du mot de passe temporaire à la première connexion (ADM-007). */
+/**
+ * Remplacement obligatoire du mot de passe temporaire à la première connexion (ADM-007),
+ * ou changement volontaire depuis « Mon compte » (libellés et retour adaptés).
+ */
 export default function ChangePasswordPage() {
   const router = useRouter();
   const qc = useQueryClient();
+  const me = useMe();
+  const policy = usePasswordPolicy();
+  // Tant que le profil n'est pas chargé, on garde la consigne du cas obligatoire (sans bouton Annuler)
+  const voluntary = me.data ? !me.data.mustChangePassword : false;
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -28,7 +39,12 @@ export default function ChangePasswordPage() {
     try {
       await api.post('/auth/change-password', { currentPassword: current, newPassword: next });
       await qc.invalidateQueries({ queryKey: ['me'] });
-      router.replace('/');
+      if (voluntary) {
+        toast.success('Mot de passe modifié. Vos autres sessions ont été fermées.');
+        router.replace('/account');
+      } else {
+        router.replace('/');
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         router.replace('/login');
@@ -44,19 +60,27 @@ export default function ChangePasswordPage() {
 
   return (
     <>
-      <h1 className="text-xl font-semibold">Choisissez votre mot de passe</h1>
+      <h1 className="text-xl font-semibold">{voluntary ? 'Changer mon mot de passe' : 'Choisissez votre mot de passe'}</h1>
       <p className="mt-1 text-sm text-ink-muted">
-        Votre mot de passe actuel est temporaire ou doit être renouvelé. Les autres sessions ouvertes seront fermées.
+        {voluntary ? 'Saisissez votre mot de passe actuel puis le nouveau.' : 'Votre mot de passe actuel est temporaire ou doit être renouvelé.'} Les autres sessions ouvertes seront fermées.
       </p>
       <form onSubmit={submit} className="mt-6 space-y-4">
-        <TextField label="Mot de passe actuel (temporaire)" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoFocus />
+        <TextField
+          label={voluntary ? 'Mot de passe actuel' : 'Mot de passe actuel (temporaire)'}
+          type="password"
+          autoComplete="current-password"
+          value={current}
+          onChange={(e) => setCurrent(e.target.value)}
+          required
+          autoFocus
+        />
         <TextField
           label="Nouveau mot de passe"
           type="password"
           autoComplete="new-password"
           value={next}
           onChange={(e) => setNext(e.target.value)}
-          hint="12 caractères minimum, 3 types parmi minuscules, majuscules, chiffres et symboles ; sans votre identifiant."
+          hint={passwordRulesHint(policy.data)}
           required
         />
         <TextField
@@ -83,6 +107,11 @@ export default function ChangePasswordPage() {
         <Button type="submit" className="w-full" loading={busy} disabled={!current || !next || mismatch}>
           Enregistrer le mot de passe
         </Button>
+        {voluntary && (
+          <Link href="/account" className="block text-center text-sm text-action hover:underline">
+            Annuler et revenir à mon compte
+          </Link>
+        )}
       </form>
     </>
   );

@@ -80,9 +80,12 @@ export default function VariancePage() {
                   <Button variant="secondary" onClick={() => setDialog('close')}>
                     <Lock className="h-4 w-4" aria-hidden /> Clôturer
                   </Button>
-                  <Button variant="ghost" onClick={() => setDialog('reopen')}>
-                    <RotateCcw className="h-4 w-4" aria-hidden /> Rouvrir
-                  </Button>
+                  {/* Pas de réouverture sur un BC clôturé ou annulé (ACH-08) */}
+                  {!['CLOSED', 'CANCELLED'].includes(v.po.status) && (
+                    <Button variant="ghost" onClick={() => setDialog('reopen')}>
+                      <RotateCcw className="h-4 w-4" aria-hidden /> Rouvrir
+                    </Button>
+                  )}
                 </>
               )}
             </>

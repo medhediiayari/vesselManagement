@@ -2,6 +2,7 @@ import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { RequireAnyPermission } from '../../common/decorators';
+import { containsText } from '../../common/utils/like';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const DirectoryQuery = z.object({
@@ -60,7 +61,7 @@ export class ReferenceController {
   @RequireAnyPermission(...DIRECTORY_PERMISSIONS)
   async directory(@Query() q: Record<string, unknown>) {
     const { type, search } = DirectoryQuery.parse(q);
-    const contains = search ? { contains: search, mode: 'insensitive' as const } : undefined;
+    const contains = search ? containsText(search) : undefined; // jokers échappés (ADM-22)
     if (type === 'USER') {
       const rows = await this.prisma.user.findMany({
         where: { status: 'ACTIVE', ...(contains ? { OR: [{ displayName: contains }, { username: contains }, { jobTitle: contains }] } : {}) },

@@ -220,6 +220,8 @@ function MembersList() {
     router.replace(matrix ? `${pathname}?view=matrix` : pathname);
   };
   const soonDays = stats.data?.expiringSoonDays;
+  // Grand écran : aperçu dans un panneau latéral fixe, visible sans faire défiler la liste (audit UI-05)
+  const showSummary = !!(selected && stats.data && !matrix);
 
   const columns: Column<MemberListItem>[] = [
     {
@@ -274,7 +276,7 @@ function MembersList() {
       ? [{ key: 'certs', header: 'Certificats', cell: (m: MemberListItem) => (m.certificateSummary ? <CertificateRatio c={m.certificateSummary} /> : '—'), hideBelow: 'lg' as const }]
       : []),
     ...(soonDays !== undefined
-      ? [{ key: 'sb', header: 'Seaman book', cell: (m: MemberListItem) => <SeamanBook m={m} soonDays={soonDays} />, hideBelow: 'xl' as const }]
+      ? [{ key: 'sb', header: 'Seaman book', cell: (m: MemberListItem) => <SeamanBook m={m} soonDays={soonDays} />, hideBelow: showSummary ? ('2xl' as const) : ('xl' as const) }]
       : []),
     { key: 'contract', header: 'Fin de contrat', cell: (m) => <ContractEnd m={m} />, hideBelow: 'lg' },
     {
@@ -412,6 +414,8 @@ function MembersList() {
         </div>
       )}
 
+      <div className={cn('grid gap-5', showSummary && 'xl:grid-cols-[minmax(0,1fr)_420px]')}>
+      <div className="min-w-0">
       {matrix && soonDays !== undefined ? (
         <CertificateMatrix
           rows={list.rows}
@@ -450,20 +454,26 @@ function MembersList() {
         columns={columns}
       />
       )}
+      </div>
 
       {/* Le seuil « expire bientôt » vient des paramètres (stats) : pas de valeur supposée en attendant */}
-      {selected && stats.data && !matrix && (
-        <div className="hidden xl:block">
+      {showSummary && (
+        <aside
+          aria-label="Aperçu de la fiche sélectionnée"
+          className="hidden self-start xl:sticky xl:top-[4.5rem] xl:block xl:max-h-[calc(100vh-5rem)] xl:overflow-y-auto"
+        >
           <MemberSummary
-            memberId={selected}
-            soonDays={stats.data.expiringSoonDays}
+            side
+            memberId={selected!}
+            soonDays={stats.data!.expiringSoonDays}
             onClose={() => {
               setSelected(null);
               setDismissed(true);
             }}
           />
-        </div>
+        </aside>
       )}
+      </div>
 
       {creating && (
         <MemberCreateDialog

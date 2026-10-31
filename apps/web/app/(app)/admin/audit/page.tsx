@@ -1,11 +1,13 @@
 'use client';
 
 import { useSearchParams } from 'next/navigation';
+import { Info } from 'lucide-react';
 import { Suspense, useState } from 'react';
 import { fmtDateTime } from '@/lib/format';
 import { useCursorList } from '@/lib/hooks';
 import { useSession } from '@/lib/session';
 import type { AuditEvent } from '@/components/amc/audit-timeline';
+import { ResourceExportButton } from '@/components/amc/resource-export';
 import { Badge } from '@/components/ui/badge';
 import { DataTable } from '@/components/ui/data-table';
 import { Dialog } from '@/components/ui/dialog';
@@ -27,6 +29,9 @@ const MODULE_PERMS: Record<string, string> = {
   platform: 'audit.view.platform',
 };
 
+/** Modules dont les événements ne portent jamais de navire : le filtre navire n'y a pas de sens. */
+const NO_VESSEL_MODULES = ['admin', 'auth', 'platform'];
+
 /** Journal d'audit append-only, lu par module et dans le scope navire (ADM-011/012). */
 export default function AuditPage() {
   return (
@@ -47,7 +52,16 @@ function AuditList() {
   const [from, setFrom] = useState(() => params.get('from') ?? '');
   const [to, setTo] = useState('');
   const [detail, setDetail] = useState<AuditEvent | null>(null);
-  const vesselId = selectedVesselIds.length === 1 ? selectedVesselIds[0] : undefined;
+  // Navire du sélecteur repris par défaut, sauf sur les liens filtrés (console admin) : filtre visible et effaçable
+  const [vessel, setVessel] = useState(() => {
+    if (params.get('vesselId')) return params.get('vesselId')!;
+    const deepLink = ['module', 'action', 'result', 'from'].some((k) => params.get(k));
+    return !deepLink && selectedVesselIds.length === 1 ? selectedVesselIds[0] : '';
+  });
+  const vesselApplies = !NO_VESSEL_MODULES.includes(module);
+  const vesselId = vesselApplies && vessel ? vessel : undefined;
+  const fromIso = from ? new Date(`${from}T00:00:00`).toISOString() : undefined;
+  const toIso = to ? new Date(`${to}T23:59:59`).toISOString() : undefined;
   const list = useCursorList<AuditEvent & { vesselId: string | null; ip: string | null }>(
     ['audit-list'],
     '/audit',
@@ -55,8 +69,8 @@ function AuditList() {
       module: module || undefined,
       action: action || undefined,
       result: result || undefined,
-      from: from ? new Date(`${from}T00:00:00`).toISOString() : undefined,
-      to: to ? new Date(`${to}T23:59:59`).toISOString() : undefined,
+      from: fromIso,
+      to: toIso,
       vesselId,
     },
     modules.length > 0,
@@ -67,6 +81,13 @@ function AuditList() {
       <PageHeader
         title="Journal d'audit"
         description="Événements en écriture seule : modifications, approbations, consultations et téléchargements sensibles, refus d'accès. Filtré selon vos droits par module et votre périmètre navire."
+        actions={
+          <ResourceExportButton
+            resource="audit"
+            filters={{ module: module || undefined, action: action || undefined, from: fromIso, to: toIso }}
+            title="Module, action et période appliqués ; le résultat et le navire ne sont pas filtrés dans l'export"
+          />
+        }
       />
       <FilterBar>
         <div className="w-48">
@@ -97,7 +118,23 @@ function AuditList() {
           <label className="field-label" htmlFor="a-to">Au</label>
           <Input id="a-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
         </div>
+        <div className="w-48">
+          <label className="field-label" htmlFor="a-vessel">Navire</label>
+          <Select id="a-vessel" value={vesselApplies ? vessel : ''} onChange={(e) => setVessel(e.target.value)} disabled={!vesselApplies}>
+            <option value="">Tous (avec événements sans navire)</option>
+            {me.accessibleVessels.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+          </Select>
+        </div>
       </FilterBar>
+      {vesselId && (
+        <p className="mb-3 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted" aria-live="polite">
+          <Info className="h-3.5 w-3.5" aria-hidden />
+          Seuls les événements rattachés à {me.accessibleVessels.find((v) => v.id === vesselId)?.name ?? 'ce navire'} sont affichés : les connexions, l’administration et les événements sans navire sont exclus.
+          <button type="button" className="font-medium text-action hover:underline" onClick={() => setVessel('')}>
+            Retirer le filtre navire
+          </button>
+        </p>
+      )}
       <DataTable
         caption="Événements d'audit"
         rows={list.rows}

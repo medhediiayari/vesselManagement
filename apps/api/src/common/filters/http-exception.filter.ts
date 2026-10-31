@@ -79,7 +79,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         typeof r === 'string' ? r : Array.isArray((r as { message?: unknown }).message)
           ? ((r as { message: string[] }).message).join(', ')
           : String((r as { message?: string }).message ?? exception.message);
-      return { statusCode: status, code: httpCode(status), message };
+      return { statusCode: status, code: httpCode(status), message: frenchFrameworkMessage(status, message) };
     }
     if (exception instanceof Prisma.PrismaClientKnownRequestError) {
       switch (exception.code) {
@@ -119,6 +119,26 @@ function extractPgMessage(e: unknown): ErrorBody | null {
     return { statusCode: 409, code: 'INVALID_STATE', message: 'Donnée immuable : opération refusée par la base' };
   }
   return null;
+}
+
+/**
+ * Messages anglais produits par le framework (Throttler, ParseUUIDPipe, Multer…) traduits avant d'atteindre
+ * l'interface (audit ADM-18 / ADM-19). Les messages applicatifs, déjà en français, passent tels quels.
+ */
+function frenchFrameworkMessage(status: number, message: string): string {
+  if (status === 429) return 'Trop de tentatives. Réessayez dans une minute.';
+  if (/uuid is expected/i.test(message)) return 'Identifiant invalide';
+  if (/numeric string is expected/i.test(message)) return 'Nombre attendu';
+  if (/file too large/i.test(message) || status === 413) return 'Fichier trop volumineux';
+  if (/too many files/i.test(message)) return 'Trop de fichiers';
+  if (/unexpected field/i.test(message)) return 'Champ de fichier inattendu';
+  if (/^cannot (get|post|put|patch|delete) /i.test(message)) return 'Ressource introuvable';
+  if (/^(unauthorized|forbidden|not found|bad request|internal server error)$/i.test(message)) {
+    return { 400: 'Requête invalide', 401: 'Authentification requise', 403: 'Accès refusé', 404: 'Ressource introuvable' }[
+      status as 400 | 401 | 403 | 404
+    ] ?? 'Erreur interne';
+  }
+  return message;
 }
 
 function httpCode(status: number): string {

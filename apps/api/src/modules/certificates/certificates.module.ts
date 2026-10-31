@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { CertificateAccessService } from './certificate-access.service';
 import { CertificateFilesService } from './certificate-files.service';
 import { CertificateRemindersService } from './certificate-reminders.service';
+import { CertificateCategoriesController, CertificateFoldersController } from './certificate-tree.controller';
+import { CertificateTreeService } from './certificate-tree.service';
 import { CertificateReminderPoliciesController, CertificateTypesController } from './certificate-types.controller';
 import { CertificateTypesService } from './certificate-types.service';
 import { CertificateWorkflowService } from './certificate-workflow.service';
@@ -18,6 +20,8 @@ import { CertificatesService } from './certificates.service';
   controllers: [
     CertificateTypesController,
     CertificateReminderPoliciesController,
+    CertificateFoldersController,
+    CertificateCategoriesController,
     CertificatesController,
     CertificateRequestsController,
     CertificateApprovalsController,
@@ -29,6 +33,7 @@ import { CertificatesService } from './certificates.service';
     CertificateWorkflowService,
     CertificateFilesService,
     CertificateRemindersService,
+    CertificateTreeService,
   ],
   exports: [CertificateAccessService, CertificatesService, CertificateWorkflowService],
 })

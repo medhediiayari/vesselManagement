@@ -111,8 +111,8 @@ export class UsersController {
 
   @Get(':id/sessions')
   @RequirePermissions('sessions.view')
-  sessions(@Param('id', ParseUUIDPipe) id: string) {
-    return this.users.listSessions(id);
+  sessions(@Auth() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.users.listSessions(ctx, id);
   }
 
   @Delete(':id/sessions/:sessionId')
@@ -221,6 +221,12 @@ export class SettingsController {
   @RequirePermissions('settings.manage')
   all() {
     return this.settings.all();
+  }
+
+  @Get('limits')
+  @RequirePermissions('settings.manage')
+  limits() {
+    return this.settings.limits();
   }
 
   @Patch(':key')

@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { AttachmentFileRow } from './attachment-file';
 import { DecisionPanel } from './decision-panel';
-import { announceWorkflow, conflictMessage, fmtDataValue } from './lib';
+import { announceWorkflow, conflictMessage, fmtDataValue, selfApproves } from './lib';
 import { AttachmentStatusBadge, RequestKindBadge, RequestStatusBadge } from './status';
 import {
   DATA_FIELD_LABELS,
@@ -101,6 +101,15 @@ const DOT: Record<TimelineEvent['tone'], string> = {
   info: 'bg-action text-white',
 };
 
+/** Auteur réel d'une annulation : demandeur, supervision ou workflow (jamais supposé). */
+function cancellationEvent(request: RequestDto): { label: string; by?: string | null } {
+  const c = request.cancellation;
+  if (c?.mode === 'AUTOMATIC') return { label: 'Annulée automatiquement' };
+  if (c?.mode === 'SUPERVISOR') return { label: 'Annulée en supervision', by: c.by?.displayName };
+  if (c?.mode === 'REQUESTER') return { label: 'Annulée par le demandeur', by: c.by?.displayName ?? request.requestedBy?.displayName };
+  return { label: 'Demande annulée' };
+}
+
 /** Chronologie d'une demande : versions immuables, soumission, décisions, annulation, escalade. */
 export function RequestTimeline({ request }: { request: RequestDto }) {
   const ic = 'h-3 w-3';
@@ -136,7 +145,7 @@ export function RequestTimeline({ request }: { request: RequestDto }) {
       tone: d.decision === 'APPROVE' ? 'ok' : d.decision === 'REJECT' ? 'danger' : 'warn',
     })),
     ...(request.status === 'CANCELLED'
-      ? [{ at: request.updatedAt, label: 'Annulée par le demandeur', by: request.requestedBy?.displayName, detail: request.cancelReason, icon: <Ban className={ic} aria-hidden />, tone: 'neutral' as const }]
+      ? [{ at: request.updatedAt, ...cancellationEvent(request), detail: request.cancelReason, icon: <Ban className={ic} aria-hidden />, tone: 'neutral' as const }]
       : []),
     ...(request.escalatedAt
       ? [{ at: request.escalatedAt, label: 'Escalade : approbation en retard', icon: <Siren className={ic} aria-hidden />, tone: 'danger' as const }]
@@ -229,7 +238,9 @@ export function RequestCard({
   const open = OPEN_STATUSES.includes(request.status);
   const mine = request.requestedBy?.id === me.id;
   const canEdit = active && mine && open && request.kind !== 'ATTACHMENT' && can('certificates.edit');
-  const canSubmit = active && mine && (request.status === 'DRAFT' || request.status === 'RETURNED') && can('certificates.submit');
+  // Publication directe : elle vaut soumission (même règle que l'API)
+  const publishes = selfApproves(can, request.kind);
+  const canSubmit = active && mine && (request.status === 'DRAFT' || request.status === 'RETURNED') && (can('certificates.submit') || publishes);
   const canCancel = mine && open && canAny('certificates.create', 'certificates.edit', 'certificates.submit');
   // Une seule demande de données ouverte par certificat : pas de duplicata tant qu'une autre est en cours
   const canDuplicate =
@@ -259,7 +270,7 @@ export function RequestCard({
     setSubmitting(true);
     try {
       const res = await api.post<WorkflowResult>(`/certificate-requests/${request.id}/submit`, { expectedVersion: request.version });
-      announceWorkflow(res, 'Demande soumise à approbation');
+      announceWorkflow(res, res.autoApproved ? 'Demande publiée' : 'Demande soumise à approbation');
       await onChanged();
     } catch (e) {
       if (!(await handleConflict(e))) toast.error(errorMessage(e));
@@ -310,7 +321,7 @@ export function RequestCard({
           )}
           {canSubmit && (
             <Button size="sm" onClick={submit} loading={submitting}>
-              <Send className="h-4 w-4" aria-hidden /> Soumettre
+              <Send className="h-4 w-4" aria-hidden /> {publishes ? 'Publier' : 'Soumettre'}
             </Button>
           )}
           {canCancel && (

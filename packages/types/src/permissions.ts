@@ -86,7 +86,10 @@ export const PERMISSIONS: PermissionDef[] = [
   p('certificates.attachments.approve', 'certificates', 'Approuver une pièce jointe ajoutée après validation', true),
   p('certificates.renewal.manage', 'certificates', 'Piloter le suivi de renouvellement'),
   p('certificates.self_approve', 'certificates', 'Publication directe sans approbation (ses propres demandes)', true),
+  p('certificates.renewal.self_approve', 'certificates', 'Renouveler sans approbation (le nouveau certificat devient courant immédiatement)', true),
   p('certificates.types.manage', 'certificates', 'Configurer types, validateurs et politiques de rappel', true),
+  p('certificates.folders.manage', 'certificates', "Créer / renommer / supprimer les dossiers de l'arborescence et y classer les certificats"),
+  p('certificates.categories.manage', 'certificates', "Créer / renommer / supprimer les catégories de l'arborescence", true),
 
   // ---------------- CSO (Company Security Officer)
   p('cso.view', 'cso', 'Voir la bibliothèque CSO'),
@@ -357,15 +360,17 @@ export const PREDEFINED_ROLES: PredefinedRole[] = [
       'bc.view', 'bc.create', 'bc.approve', 'bc.send', 'bc.cancel',
       'receiving.view', 'receiving.record', 'receiving.validate', 'variances.manage',
       'invoice.view', 'invoice.manage',
-      'certificates.view', 'members.view', 'noon.view',
+      'certificates.view', 'members.view', 'noon.view', 'voyages.view',
     ],
   },
   {
     key: 'COMMERCIAL',
     name: 'Commercial',
-    description: 'RACI : C Noon Reports (accusé de réception, demande de correction) ; I achats, certificats, équipages.',
+    description:
+      'RACI : C Noon Reports (accusé de réception, demande de correction) ; création des voyages (avec Marine Operations, ' +
+      'qui les complète, les active et les clôture) ; I achats, certificats, équipages.',
     permissions: [
-      'vessels.view', 'dashboard.view', 'reports.export',
+      'vessels.view', 'dashboard.view', 'reports.export', 'voyages.view', 'voyages.create',
       ...PURCHASING_READS, 'certificates.view', 'members.view', 'noon.view', 'noon.export', 'noon.approve',
     ],
   },

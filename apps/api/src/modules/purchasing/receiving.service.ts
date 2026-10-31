@@ -11,6 +11,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PurchasingCore } from './purchasing-core.service';
 import { PurchasingDocuments } from './purchasing-documents.service';
 import { LINKS } from './purchasing.constants';
+import { escapeLike } from '../../common/utils/like';
 import {
   D,
   computeBalance,
@@ -90,7 +91,7 @@ export class ReceivingService {
         q.vesselId ? { vesselId: q.vesselId } : {},
         q.supplierId ? { supplierId: q.supplierId } : {},
         q.status?.length ? { status: { in: q.status } } : {},
-        q.search ? { number: { contains: q.search, mode: 'insensitive' } } : {},
+        q.search ? { number: { contains: escapeLike(q.search), mode: 'insensitive' } } : {},
       ],
     };
     const [rows, total] = await Promise.all([
@@ -403,11 +404,12 @@ export class ReceivingService {
     const hash = requestHash(dto);
     const replay = await this.findOnboardReplay(ctx, key, hash);
     if (replay) return { ...replay, replay: true };
-    let created: { deliveryNoteId: string; receiptId: string | null; poId: string; discrepancies: Discrepancy[] };
+    let created: { deliveryNoteId: string; receiptId: string | null; poId: string; discrepancies: Discrepancy[] } | null;
     try {
       created = await this.core.serializable(async (tx) => {
+        // Requête concurrente de même clé déjà validée (ou reprise après conflit de sérialisation) : rejeu, pas 409 (ACH-09)
         const already = await tx.idempotencyKey.findUnique({ where: { userId_key: { userId: ctx.userId, key } } });
-        if (already) throw Errors.idempotencyConflict('Idempotency-Key déjà utilisée');
+        if (already) return null;
         const po = await this.core.findPo(ctx, dto.poId, tx);
         if (!isPoReceivable(po)) throw Errors.invalidState(`BC ${po.status} : BL impossible (BC non émis, annulé ou clôturé)`, { status: po.status });
         const poLines = await tx.poLine.findMany({ where: { poId: po.id }, orderBy: { lineNo: 'asc' } });
@@ -524,6 +526,12 @@ export class ReceivingService {
           })
           .filter((d) => D(d.missing).greaterThan(0) || D(d.surplus).greaterThan(0));
 
+        // Résultat conservé pour un rejeu (écarts compris)
+        await tx.idempotencyKey.update({
+          where: { userId_key: { userId: ctx.userId, key } },
+          data: { responseBody: { deliveryNoteId: dn.id, receiptId, discrepancies } as unknown as Prisma.InputJsonValue },
+        });
+
         await this.core.audit(
           ctx,
           {
@@ -590,6 +598,11 @@ export class ReceivingService {
       }
       throw e;
     }
+    if (!created) {
+      const r = await this.findOnboardReplay(ctx, key, hash);
+      if (!r) throw Errors.idempotencyConflict('Idempotency-Key déjà utilisée');
+      return { ...r, replay: true };
+    }
     const po = await this.prisma.purchaseOrder.findUniqueOrThrow({ where: { id: created.poId }, select: { id: true, number: true, status: true, lockVersion: true } });
     return { deliveryNote: await this.getDeliveryNote(ctx, created.deliveryNoteId), receiptId: created.receiptId, order: po, discrepancies: created.discrepancies, replay: false };
   }
@@ -599,10 +612,10 @@ export class ReceivingService {
     const idem = await this.prisma.idempotencyKey.findUnique({ where: { userId_key: { userId: ctx.userId, key } } });
     if (!idem) return null;
     if (idem.route !== ONBOARD_ROUTE || idem.requestHash !== hash) throw Errors.idempotencyConflict('Même Idempotency-Key avec un contenu différent : nouvelle clé requise');
-    const body = idem.responseBody as { deliveryNoteId: string; receiptId: string | null };
+    const body = idem.responseBody as unknown as { deliveryNoteId: string; receiptId: string | null; discrepancies?: Discrepancy[] };
     const dn = await this.getDeliveryNote(ctx, body.deliveryNoteId);
     const po = await this.prisma.purchaseOrder.findUniqueOrThrow({ where: { id: dn.poId }, select: { id: true, number: true, status: true, lockVersion: true } });
-    return { deliveryNote: dn, receiptId: body.receiptId, order: po, discrepancies: [] as Discrepancy[] };
+    return { deliveryNote: dn, receiptId: body.receiptId, order: po, discrepancies: body.discrepancies ?? [] };
   }
 
   /** Validation du rapport de réception par une personne habilitée (receiving.validate), distincte du réceptionnaire. */

@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Panel } from '@/components/ui/page';
 import { EmptyState, ErrorState, Forbidden, LoadingBlock } from '@/components/ui/states';
 import { ReferenceDecisionDialog, VersionDecisionDialog } from './decision-panel';
-import { useApprovals } from './lib';
+import { has, useApprovals } from './lib';
 import type { ApprovalsInbox, CsoDocumentDetail } from './types';
 import { Reference, userName, VersionStatusBadge } from './ui';
 
@@ -129,7 +129,7 @@ export function ApprovalsList() {
           onOpenChange={(o) => !o && setDeciding(null)}
           doc={deciding.document}
           version={deciding.version}
-          canPreview={can('cso.preview')}
+          canPreview={has(deciding.document.actions, 'preview')}
         />
       )}
       {refDeciding && (

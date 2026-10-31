@@ -15,3 +15,4 @@ apps/api/tmp/
 apps/api/openapi.json
 .playwright-mcp/
 .claude/
+backups/

@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { useCursorList } from '@/lib/hooks';
 import { useSession } from '@/lib/session';
 import { PermissionGate } from '@/components/amc/permission-gate';
+import { ResourceExportButton } from '@/components/amc/resource-export';
 import { StatusBadge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/ui/data-table';
@@ -31,11 +32,14 @@ export default function VesselsPage() {
         title="Navires"
         description="Navires de votre périmètre. Un navire désactivé reste consultable dans l'historique."
         actions={
-          <PermissionGate allOf={['vessels.create']}>
-            <Button onClick={() => setCreating(true)}>
-              <Plus className="h-4 w-4" aria-hidden /> Nouveau navire
-            </Button>
-          </PermissionGate>
+          <>
+            <ResourceExportButton resource="vessels" title="Tous les navires de votre périmètre (la recherche et le statut ne sont pas appliqués)" />
+            <PermissionGate allOf={['vessels.create']}>
+              <Button onClick={() => setCreating(true)}>
+                <Plus className="h-4 w-4" aria-hidden /> Nouveau navire
+              </Button>
+            </PermissionGate>
+          </>
         }
       />
       <FilterBar>

@@ -6,6 +6,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import type { AuthContext } from '../access/auth-context';
 import { diffFields } from '../audit/audit.service';
 import { PurchasingCore } from './purchasing-core.service';
+import { escapeLike } from '../../common/utils/like';
 import {
   CreateSupplierContactDto,
   CreateSupplierDto,
@@ -34,10 +35,10 @@ export class SuppliersService {
         q.search
           ? {
               OR: [
-                { name: { contains: q.search, mode: 'insensitive' } },
-                { legalName: { contains: q.search, mode: 'insensitive' } },
-                { code: { contains: q.search.toUpperCase() } },
-                { email: { contains: q.search.toLowerCase() } },
+                { name: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { legalName: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { code: { contains: escapeLike(q.search).toUpperCase() } },
+                { email: { contains: escapeLike(q.search).toLowerCase() } },
               ],
             }
           : {},

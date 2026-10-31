@@ -1,4 +1,5 @@
 import './load-env';
+import './common/zod-fr';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';

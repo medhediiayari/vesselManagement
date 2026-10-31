@@ -109,6 +109,16 @@ export function isPreviewable(kind: string | undefined | null) {
 }
 
 /**
+ * Issue réelle d'un dépôt d'après le statut renvoyé par l'API (CSO-04) : une publication directe
+ * (`cso.self_approve`) peut retomber dans le circuit normal si le dossier refuse l'approbation.
+ */
+export function versionOutcome(status: string | null | undefined): string {
+  if (status === 'PUBLISHED') return 'publiée directement';
+  if (status === 'PENDING_APPROVAL') return 'soumise pour approbation';
+  return 'enregistrée en brouillon';
+}
+
+/**
  * Message d'erreur lisible pour les gestes CSO, y compris les conflits de concurrence
  * (409 STALE_VERSION / ALREADY_PROCESSED) et les champs obligatoires manquants.
  */

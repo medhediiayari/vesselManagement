@@ -16,6 +16,7 @@ import { Checkbox, Field, Input, Select } from '@/components/ui/field';
 import { FilterBar, PageHeader } from '@/components/ui/page';
 import { Forbidden, LoadingBlock } from '@/components/ui/states';
 import type { DepartmentDto, RoleDto, UserListItem } from '../types';
+import { roleGrantBlock } from './role-grant';
 import { TemporaryPasswordNotice, UserStatusBadges } from './user-widgets';
 
 function CreateUserDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (o: boolean) => void; onCreated: () => void }) {
@@ -108,15 +109,20 @@ function CreateUserDialog({ open, onOpenChange, onCreated }: { open: boolean; on
           <fieldset>
             <legend className="field-label">Rôles (cumulables)</legend>
             <div className="grid gap-2 sm:grid-cols-2">
-              {roles.data?.map((r) => (
-                <Checkbox
-                  key={r.id}
-                  label={r.name}
-                  description={r.description ?? undefined}
-                  checked={roleIds.includes(r.id)}
-                  onChange={(e) => setRoleIds(e.target.checked ? [...roleIds, r.id] : roleIds.filter((x) => x !== r.id))}
-                />
-              ))}
+              {roles.data?.map((r) => {
+                const block = roleGrantBlock(r, me);
+                return (
+                  <Checkbox
+                    key={r.id}
+                    label={r.name}
+                    description={block ? <span className="text-warn">{block}</span> : r.description ?? undefined}
+                    title={block ?? undefined}
+                    checked={roleIds.includes(r.id)}
+                    disabled={!!block}
+                    onChange={(e) => setRoleIds(e.target.checked ? [...roleIds, r.id] : roleIds.filter((x) => x !== r.id))}
+                  />
+                );
+              })}
             </div>
             <p className="field-hint">Vous ne pouvez attribuer que des droits que vous possédez vous-même.</p>
           </fieldset>

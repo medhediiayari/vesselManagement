@@ -10,7 +10,6 @@ import { api, type StoredFileDto } from '@/lib/api';
 import { fmtDate, fmtDateTime, fmtDecimal } from '@/lib/format';
 import { useAction } from '@/lib/hooks';
 import { useSession } from '@/lib/session';
-import { AuditTimeline } from '@/components/amc/audit-timeline';
 import { FileRow } from '@/components/amc/file-preview';
 import { FileUploader } from '@/components/amc/file-uploader';
 import { PermissionGate } from '@/components/amc/permission-gate';
@@ -19,11 +18,12 @@ import { SecureImage } from '@/components/amc/secure-image';
 import { Badge, StatusBadge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
-import { Field, Input, Select } from '@/components/ui/field';
+import { Checkbox, Field, Input, Select } from '@/components/ui/field';
 import { DefinitionGrid, PageHeader, Panel } from '@/components/ui/page';
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { VesselFormDialog, type VesselDto } from '../vessel-form';
+import { VesselHistory } from './vessel-history';
 
 interface Workspace {
   vessel: VesselDto & { photo: StoredFileDto | null };
@@ -45,8 +45,13 @@ interface Attachment {
   title: string;
   createdAt: string;
   archivedAt: string | null;
-  file: StoredFileDto;
+  // null si le fichier stocké est introuvable (audit FLT-23)
+  file: StoredFileDto | null;
 }
+
+/** Notation unique d'un champ vide sur la fiche (audit UI-07). */
+const MISSING = 'Non renseigné';
+const orMissing = (v: ReactNode) => (v === null || v === undefined || v === '' ? <span className="font-normal text-ink-soft">{MISSING}</span> : v);
 
 /** Caractéristiques d'identification (« ship particulars ») : références en chasse fixe, valeurs absentes explicites. */
 function Particulars({ items }: { items: [label: string, value: string | null | undefined, identifier?: boolean][] }) {
@@ -55,7 +60,7 @@ function Particulars({ items }: { items: [label: string, value: string | null | 
       {items.map(([k, val, identifier]) => (
         <div key={k} className="min-w-0">
           <dt className="text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">{k}</dt>
-          <dd className={val ? `${identifier ? 'ref' : ''} text-sm font-medium text-navy` : 'text-sm text-ink-soft'}>{val || 'Non renseigné'}</dd>
+          <dd className={val ? `${identifier ? 'ref' : ''} text-sm font-medium text-navy` : 'text-sm text-ink-soft'}>{val || MISSING}</dd>
         </div>
       ))}
     </dl>
@@ -72,7 +77,7 @@ function ModuleLink({ href, children }: { href: string; children: ReactNode }) {
 
 export default function VesselWorkspacePage() {
   const { id } = useParams<{ id: string }>();
-  const { refresh } = useSession();
+  const { refresh, can } = useSession();
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
@@ -82,11 +87,13 @@ export default function VesselWorkspacePage() {
   const [pendingFile, setPendingFile] = useState<StoredFileDto | null>(null);
   const [attTitle, setAttTitle] = useState('');
   const [attCategory, setAttCategory] = useState('Plans & documents techniques');
+  const [showArchived, setShowArchived] = useState(false);
+  const [archiving, setArchiving] = useState<Attachment | null>(null);
 
   const ws = useQuery({ queryKey: ['vessel-workspace', id], queryFn: () => api.get<Workspace>(`/vessels/${id}/workspace`) });
   const attachments = useQuery({
-    queryKey: ['vessel-attachments', id],
-    queryFn: () => api.get<Attachment[]>(`/vessels/${id}/attachments`),
+    queryKey: ['vessel-attachments', id, showArchived],
+    queryFn: () => api.get<Attachment[]>(`/vessels/${id}/attachments`, { query: { archived: showArchived || undefined } }),
     enabled: !!ws.data,
   });
 
@@ -112,6 +119,14 @@ export default function VesselWorkspacePage() {
   const v = ws.data.vessel;
   const s = ws.data.sections;
   const vq = `vesselId=${v.id}`;
+  const canEdit = can('vessels.edit');
+  const missingCount = [
+    v.managerName, v.ownerName, v.builder, v.yearBuilt, v.grossTonnage, v.netTonnage, v.deadweight, v.lengthOverall,
+    v.beam, v.summerDraft, v.flag, v.callSign, v.mmsi, v.portOfRegistry, v.classSociety,
+  ].filter((x) => x === null || x === '').length;
+  const dec = (x: string | null) => (x ? fmtDecimal(x) : null);
+  const pair = (a: string | null, b: string | null, sep: string) =>
+    a || b ? `${a ? fmtDecimal(a) : 'non renseignée'}${sep}${b ? fmtDecimal(b) : 'non renseignée'}` : null;
 
   return (
     <>
@@ -148,6 +163,14 @@ export default function VesselWorkspacePage() {
                 ['Classe', v.classSociety],
               ]}
             />
+            {canEdit && missingCount > 0 && (
+              <p className="mt-2 border-t border-line pt-2 text-xs text-ink-muted">
+                {missingCount} caractéristique(s) non renseignée(s).{' '}
+                <button type="button" className="font-medium text-action hover:underline" onClick={() => setEditing(true)}>
+                  Compléter la fiche
+                </button>
+              </p>
+            )}
           </div>
         }
         actions={
@@ -184,15 +207,15 @@ export default function VesselWorkspacePage() {
             <DefinitionGrid
               columns={3}
               items={[
-                ['Gestionnaire', v.managerName],
-                ['Armateur', v.ownerName],
-                ['Chantier / année', [v.builder, v.yearBuilt].filter(Boolean).join(' — ') || null],
-                ['Jauge brute / nette', v.grossTonnage || v.netTonnage ? `${fmtDecimal(v.grossTonnage)} / ${fmtDecimal(v.netTonnage)}` : null],
-                ['Port en lourd (t)', fmtDecimal(v.deadweight)],
-                ['Dimensions (m)', v.lengthOverall || v.beam ? `${fmtDecimal(v.lengthOverall)} × ${fmtDecimal(v.beam)}` : null],
-                ["Tirant d'eau été (m)", fmtDecimal(v.summerDraft)],
-                ['Fuseau horaire', v.timezone],
-                ['Contact bord', [v.contactEmail, v.contactPhone].filter(Boolean).join(' — ') || null],
+                ['Gestionnaire', orMissing(v.managerName)],
+                ['Armateur', orMissing(v.ownerName)],
+                ['Chantier / année', orMissing([v.builder, v.yearBuilt].filter(Boolean).join(' — '))],
+                ['Jauge brute / nette', orMissing(pair(v.grossTonnage, v.netTonnage, ' / '))],
+                ['Port en lourd (t)', orMissing(dec(v.deadweight))],
+                ['Dimensions (m)', orMissing(pair(v.lengthOverall, v.beam, ' × '))],
+                ["Tirant d'eau été (m)", orMissing(dec(v.summerDraft))],
+                ['Fuseau horaire', orMissing(v.timezone)],
+                ['Contact bord', orMissing([v.contactEmail, v.contactPhone].filter(Boolean).join(' — '))],
                 ['Mise à jour', fmtDateTime(v.updatedAt)],
               ]}
             />
@@ -229,8 +252,9 @@ export default function VesselWorkspacePage() {
                 )}
                 {s.crew && (
                   <Register title="Équipage">
-                    <RegisterRow label="Marins à bord" value={s.crew.onboard} href={`/members?${vq}`} />
-                    <RegisterRow label="Embarquements prévus" value={s.crew.planned} tone="info" href={`/members?${vq}`} />
+                    {/* Équipage par navire : mêmes règles de comptage que ces compteurs (audit FLT-17) */}
+                    <RegisterRow label="Marins à bord" value={s.crew.onboard} href={`/members/crew?${vq}`} />
+                    <RegisterRow label="Embarquements prévus" value={s.crew.planned} tone="info" href={`/members/crew?${vq}`} />
                   </Register>
                 )}
                 {s.purchasing && (
@@ -246,7 +270,7 @@ export default function VesselWorkspacePage() {
 
         {s.crew && (
           <TabsContent value="crew">
-            <Panel title="Équipage" actions={<ModuleLink href={`/members?${vq}`}>Liste détaillée et affectations</ModuleLink>}>
+            <Panel title="Équipage" actions={<ModuleLink href={`/members/crew?${vq}`}>Équipage et affectations</ModuleLink>}>
               <p className="text-sm text-ink-muted">
                 {s.crew.onboard} marin(s) à bord, {s.crew.planned} embarquement(s) prévu(s). La gestion des affectations (embarquement,
                 débarquement, relève) se fait depuis le module Marins & personnel.
@@ -307,11 +331,14 @@ export default function VesselWorkspacePage() {
           <Panel
             title="Pièces jointes du navire"
             actions={
-              <PermissionGate allOf={['vessel_documents.manage']}>
-                <Button size="sm" onClick={() => setAttachOpen(true)}>
-                  Ajouter
-                </Button>
-              </PermissionGate>
+              <div className="flex items-center gap-3">
+                <Checkbox label="Archivées" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+                <PermissionGate allOf={['vessel_documents.manage']}>
+                  <Button size="sm" onClick={() => setAttachOpen(true)}>
+                    Ajouter
+                  </Button>
+                </PermissionGate>
+              </div>
             }
           >
             {attachments.isLoading && <LoadingBlock rows={3} />}
@@ -320,23 +347,38 @@ export default function VesselWorkspacePage() {
               <EmptyState title="Aucune pièce jointe" description="Plans, rapports de visite, photos : déposez-les ici (stockage privé, accès contrôlé)." />
             )}
             <div className="space-y-2">
-              {attachments.data?.map((a) => (
-                <FileRow
-                  key={a.id}
-                  fileId={a.file.id}
-                  name={`${a.title} — ${a.file.originalName}`}
-                  kind={a.file.kind}
-                  sizeBytes={a.file.sizeBytes}
-                  extra={<Badge tone="neutral" icon={false}>{a.category}</Badge>}
-                />
-              ))}
+              {attachments.data?.map((a) => {
+                const extra = (
+                  <>
+                    <Badge tone="neutral" icon={false}>{a.category}</Badge>
+                    {a.archivedAt ? (
+                      <Badge tone="neutral" icon={false}>Archivée le {fmtDate(a.archivedAt)}</Badge>
+                    ) : (
+                      can('vessel_documents.manage') && (
+                        <Button variant="ghost" size="sm" onClick={() => setArchiving(a)} aria-label={`Archiver ${a.title}`}>
+                          <Archive className="h-4 w-4" aria-hidden /> Archiver
+                        </Button>
+                      )
+                    )}
+                  </>
+                );
+                return a.file ? (
+                  <FileRow key={a.id} fileId={a.file.id} name={`${a.title} — ${a.file.originalName}`} kind={a.file.kind} sizeBytes={a.file.sizeBytes} extra={extra} />
+                ) : (
+                  <div key={a.id} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-white px-3 py-2 text-sm">
+                    <span className="min-w-0 flex-1 truncate font-medium text-ink">{a.title}</span>
+                    <span className="text-xs text-warn">Fichier introuvable</span>
+                    {extra}
+                  </div>
+                );
+              })}
             </div>
           </Panel>
         </TabsContent>
 
         <TabsContent value="activity">
           <Panel title="Historique des informations officielles">
-            <AuditTimeline entityType="vessel" entityId={v.id} module="fleet" />
+            <VesselHistory vesselId={v.id} />
           </Panel>
         </TabsContent>
       </Tabs>
@@ -395,6 +437,18 @@ export default function VesselWorkspacePage() {
           </Field>
         </div>
       </Dialog>
+
+      <ConfirmDialog
+        open={!!archiving}
+        onOpenChange={(o) => !o && setArchiving(null)}
+        title="Archiver la pièce jointe"
+        description={archiving ? `« ${archiving.title} » ne sera plus listée par défaut ; elle reste consultable avec le filtre « Archivées ».` : undefined}
+        confirmLabel="Archiver"
+        onConfirm={async () => {
+          await api.post(`/vessels/${id}/attachments/${archiving!.id}/archive`);
+          await qc.invalidateQueries({ queryKey: ['vessel-attachments', id] });
+        }}
+      />
 
       <ConfirmDialog
         open={statusOpen}

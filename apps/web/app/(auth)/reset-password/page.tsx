@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
 import { ApiError, api } from '@/lib/api';
+import { passwordRulesHint, usePasswordPolicy } from '@/components/amc/password-rules';
 import { Button } from '@/components/ui/button';
 import { TextField } from '@/components/ui/field';
 
@@ -14,6 +15,7 @@ function ResetForm() {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
+  const policy = usePasswordPolicy();
   if (!token) return <p className="text-sm text-danger">Lien de réinitialisation incomplet.</p>;
   return done ? (
     <p className="rounded-md border border-ok-line bg-ok-bg px-3 py-2 text-sm text-ok">
@@ -38,7 +40,15 @@ function ResetForm() {
         }
       }}
     >
-      <TextField label="Nouveau mot de passe" type="password" autoComplete="new-password" value={pwd} onChange={(e) => setPwd(e.target.value)} required />
+      <TextField
+        label="Nouveau mot de passe"
+        type="password"
+        autoComplete="new-password"
+        value={pwd}
+        onChange={(e) => setPwd(e.target.value)}
+        hint={passwordRulesHint(policy.data)}
+        required
+      />
       <TextField
         label="Confirmer"
         type="password"

@@ -12,6 +12,8 @@ import { FileAccessRegistry } from '../files/file-access.registry';
 import { FilesService, toFileDto } from '../files/files.service';
 import { SettingsService } from '../settings/settings.service';
 import { MemberDuplicatesService } from './member-duplicates.service';
+import { escapeLike } from '../../common/utils/like';
+import { creatorLabels } from '../../common/utils/creators';
 import {
   CreateMemberDto,
   DuplicateCheckDto,
@@ -30,9 +32,11 @@ import {
   PROTECTED_MEMBER_FIELDS,
   certificateValidity,
   changedProtectedFields,
+  memberDataIssues,
   redactMemberAuditPayload,
   resolveManualStatus,
   sameValue,
+  searchIdentifierKey,
   todayYmd,
   validateCustomFieldValue,
   ymd,
@@ -137,7 +141,7 @@ export class MembersService implements OnModuleInit {
     const and: Prisma.MemberWhereInput[] = [memberVisibilityWhere(ctx), q.archived ? { archivedAt: { not: null } } : { archivedAt: null }];
     if (q.status) and.push({ status: q.status });
     if (q.crewDepartment) and.push({ crewDepartment: q.crewDepartment });
-    if (q.rank) and.push({ rank: { contains: q.rank, mode: 'insensitive' } });
+    if (q.rank) and.push({ rank: { contains: escapeLike(q.rank), mode: 'insensitive' } });
     if (q.vesselId) and.push({ crewAssignments: { some: { vesselId: q.vesselId, status: { in: ['PLANNED', 'ONBOARD'] } } } });
     if (q.category) {
       // Catégorie = ensemble de rangs du référentiel ; la fiche porte le libellé officiel du rang
@@ -145,14 +149,12 @@ export class MembersService implements OnModuleInit {
       and.push({ rank: { in: ranks.map((r) => r.name) } });
     }
     if (q.search) {
-      const tokens = q.search.split(/\s+/).filter(Boolean).slice(0, 4);
-      const compact = q.search.replace(/\s+/g, '');
+      const tokens = q.search.split(/\s+/).filter(Boolean).slice(0, 4).map(escapeLike);
+      const idMatches = await this.identifierMatches(q.search);
       and.push({
         OR: [
           { AND: tokens.map((t) => ({ OR: [{ lastName: { contains: t, mode: 'insensitive' as const } }, { firstName: { contains: t, mode: 'insensitive' as const } }] })) },
-          { amcRef: { contains: compact, mode: 'insensitive' } },
-          { passportNumber: { contains: compact, mode: 'insensitive' } },
-          { seamanBookNumber: { contains: compact, mode: 'insensitive' } },
+          ...(idMatches.length ? [{ id: { in: idMatches } }] : []),
         ],
       });
     }
@@ -306,6 +308,8 @@ export class MembersService implements OnModuleInit {
       this.activeFieldDefs(),
     ]);
 
+    // Auteur de chaque affectation : ne pas annuler le travail d'un autre sans le savoir
+    const creators = await creatorLabels(this.prisma, assignments.map((a) => a.createdById));
     const assignmentDto = assignments
       .map((a) => ({
         id: a.id,
@@ -321,6 +325,8 @@ export class MembersService implements OnModuleInit {
         joinPort: a.joinPort,
         signOffPort: a.signOffPort,
         relievesAssignmentId: a.relievesAssignmentId,
+        createdAt: a.createdAt,
+        createdBy: a.createdById ? (creators.get(a.createdById) ?? null) : null,
         updatedAt: a.updatedAt,
       }))
       .sort((x, y) => (y.actualJoinDate ?? y.plannedJoinDate ?? '').localeCompare(x.actualJoinDate ?? x.plannedJoinDate ?? ''));
@@ -469,6 +475,7 @@ export class MembersService implements OnModuleInit {
    */
   async create(ctx: AuthContext, dto: CreateMemberDto) {
     const { customFields, photoFileId, force, forceReason, status, ...data } = dto;
+    this.assertMemberData(data);
     const prot = changedProtectedFields({}, data);
     if (prot.length) this.assertProtected(ctx, prot);
     if (data.departmentId) await this.assertDepartmentAssignable(data.departmentId);
@@ -520,6 +527,16 @@ export class MembersService implements OnModuleInit {
     if (before.archivedAt) throw Errors.invalidState('Fiche archivée : la restaurer avant toute modification');
     const { customFields, expectedUpdatedAt, force, forceReason, ...patch } = dto;
     if (expectedUpdatedAt && new Date(expectedUpdatedAt).getTime() !== before.updatedAt.getTime()) throw Errors.staleVersion();
+    this.assertMemberData(
+      {
+        birthDate: patch.birthDate !== undefined ? patch.birthDate : before.birthDate,
+        passportExpiry: patch.passportExpiry !== undefined ? patch.passportExpiry : before.passportExpiry,
+        seamanBookExpiry: patch.seamanBookExpiry !== undefined ? patch.seamanBookExpiry : before.seamanBookExpiry,
+        nationality: patch.nationality !== undefined ? patch.nationality : before.nationality,
+        passportCountry: patch.passportCountry !== undefined ? patch.passportCountry : before.passportCountry,
+      },
+      patch,
+    );
 
     const prot = changedProtectedFields(before as unknown as Record<string, unknown>, patch);
     if (prot.length) this.assertProtected(ctx, prot);
@@ -844,6 +861,48 @@ export class MembersService implements OnModuleInit {
   }
 
   // ---------------------------------------------------------------------------
+
+  /**
+   * Fiches dont le matricule, le passeport ou le seaman book contient la saisie, comparés sans
+   * espaces ni ponctuation des deux côtés (audit FLT-04 : la reprise a stocké « TG 2384 »).
+   * Même normalisation que la détection des doublons (member-duplicates.service.ts).
+   */
+  private async identifierMatches(search: string): Promise<string[]> {
+    const key = searchIdentifierKey(search);
+    if (!key) return [];
+    const pattern = `%${key}%`;
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT id FROM members
+      WHERE regexp_replace(upper(coalesce(amc_ref, '')), '[^A-Z0-9]', '', 'g') LIKE ${pattern}
+         OR regexp_replace(upper(coalesce(passport_number, '')), '[^A-Z0-9]', '', 'g') LIKE ${pattern}
+         OR regexp_replace(upper(coalesce(seaman_book_number, '')), '[^A-Z0-9]', '', 'g') LIKE ${pattern}
+      LIMIT 5000`);
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * Mêmes contrôles que l'import (audit FLT-13). En modification, seuls les champs envoyés sont
+   * jugés : une donnée reprise incohérente ne bloque pas la correction d'un autre champ.
+   */
+  private assertMemberData(
+    m: { birthDate?: Date | null; passportExpiry?: Date | null; seamanBookExpiry?: Date | null; nationality?: string | null; passportCountry?: string | null },
+    patch?: Record<string, unknown>,
+  ) {
+    let issues = memberDataIssues({
+      birthDate: ymd(m.birthDate),
+      passportExpiry: ymd(m.passportExpiry),
+      seamanBookExpiry: ymd(m.seamanBookExpiry),
+      nationality: m.nationality,
+      passportCountry: m.passportCountry,
+    });
+    if (patch) {
+      const sent = (f: string) => patch[f] !== undefined;
+      issues = issues.filter((i) => sent(i.field) || ((i.field === 'passportExpiry' || i.field === 'seamanBookExpiry') && sent('birthDate')));
+    }
+    if (issues.length) {
+      throw Errors.validation(issues.map((i) => i.message).join(' ; '), issues.map((i) => ({ path: i.field, message: i.message })));
+    }
+  }
 
   private assertProtected(ctx: AuthContext, fields: string[]) {
     if (!can(ctx, 'members.personal_fields.manage')) {

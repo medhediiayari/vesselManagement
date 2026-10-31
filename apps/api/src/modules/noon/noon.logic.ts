@@ -307,6 +307,95 @@ export function validateForSubmission(values: NoonValues, now: Date): NoonIssue[
 }
 
 // -----------------------------------------------------------------------------
+// Unicité par jour local, bornes par rapport au voyage, vraisemblance (audit FLT-07 / FLT-11)
+// -----------------------------------------------------------------------------
+
+/** Rapports quotidiens : un seul par voyage et par jour local du bord. */
+export const DAILY_REPORT_TYPES: NoonReportType[] = ['NOON', 'MIDNIGHT'];
+
+/** Jour local du bord (AAAA-MM-JJ) d'un horodatage UTC. */
+export function localDayKey(utc: Date, offsetMinutes: number | null | undefined): string {
+  return new Date(utc.getTime() + Number(offsetMinutes ?? 0) * 60_000).toISOString().slice(0, 10);
+}
+
+export interface ReportSlot {
+  reportType: NoonReportType;
+  reportDateUtc: Date;
+  utcOffsetMinutes: number | null | undefined;
+}
+
+/** Même créneau : même jour local pour NOON / MIDNIGHT, même horodatage pour ARRIVAL / DEPARTURE. */
+export function sameReportSlot(a: ReportSlot, b: ReportSlot): boolean {
+  if (a.reportType !== b.reportType) return false;
+  if (DAILY_REPORT_TYPES.includes(a.reportType)) {
+    return localDayKey(a.reportDateUtc, a.utcOffsetMinutes) === localDayKey(b.reportDateUtc, b.utcOffsetMinutes);
+  }
+  return a.reportDateUtc.getTime() === b.reportDateUtc.getTime();
+}
+
+/**
+ * Date du rapport au plus tôt au début du voyage : la plus ancienne date connue parmi la
+ * création, l'ETD, l'ATD et le début de laycan, moins 24 h (un rapport de 2019 sur un voyage de 2026 est refusé).
+ */
+export function reportDateBeforeVoyage(
+  report: Date,
+  voyage: { createdAt: Date; etd: Date | null; atd: Date | null; laycanFrom: Date | null },
+): NoonIssue | null {
+  const known = [voyage.createdAt, voyage.etd, voyage.atd, voyage.laycanFrom].filter((d): d is Date => !!d);
+  const earliest = Math.min(...known.map((d) => d.getTime()));
+  if (report.getTime() >= earliest - REPORT_DATE_FUTURE_TOLERANCE_MS) return null;
+  return { path: 'reportDateUtc', message: `Date du rapport antérieure au début du voyage (${new Date(earliest).toISOString().slice(0, 10)})` };
+}
+
+/** Facteur de tolérance distance / (vitesse × heures). */
+export const DISTANCE_TOLERANCE = 1.2;
+
+export interface PreviousReport {
+  reportDateUtc: Date;
+  foRobMt: NoonScalar;
+  doRobMt: NoonScalar;
+}
+
+/**
+ * Avertissements NON bloquants affichés avant soumission : distance invraisemblable pour la
+ * vitesse déclarée, ROB en hausse par rapport au rapport précédent sans soutage signalé.
+ */
+export function noonPlausibilityWarnings(values: NoonValues, previous: PreviousReport | null): NoonIssue[] {
+  const warnings: NoonIssue[] = [];
+  const report = values.reportDateUtc instanceof Date ? values.reportDateUtc : null;
+  const distance = toDecimal(values.distanceSinceLastNm);
+  const speed = toDecimal(values.speedKnots);
+  // Heures écoulées depuis le rapport précédent, à défaut heures de marche déclarées
+  const elapsed = previous && report ? (report.getTime() - previous.reportDateUtc.getTime()) / 3_600_000 : null;
+  const hours = elapsed && elapsed > 0 ? new Prisma.Decimal(elapsed.toFixed(2)) : toDecimal(values.runningHours);
+  if (distance && speed && hours && hours.greaterThan(0)) {
+    const max = speed.mul(hours).mul(DISTANCE_TOLERANCE);
+    if (distance.greaterThan(max)) {
+      warnings.push({
+        path: 'distanceSinceLastNm',
+        message: `Distance ${distance.toString()} nm supérieure à vitesse × heures (${speed.toString()} kn × ${hours.toString()} h, tolérance 20 %) : à vérifier`,
+      });
+    }
+  }
+  if (previous) {
+    for (const [field, label] of [
+      ['foRobMt', 'FO ROB'],
+      ['doRobMt', 'DO ROB'],
+    ] as const) {
+      const before = toDecimal(previous[field]);
+      const now = toDecimal(values[field]);
+      if (before && now && now.greaterThan(before)) {
+        warnings.push({
+          path: field,
+          message: `${label} en hausse depuis le rapport précédent (${before.toString()} → ${now.toString()} MT) : préciser le soutage dans « Remarks »`,
+        });
+      }
+    }
+  }
+  return warnings;
+}
+
+// -----------------------------------------------------------------------------
 // Heure locale
 // -----------------------------------------------------------------------------
 

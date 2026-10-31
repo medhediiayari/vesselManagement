@@ -33,7 +33,7 @@ import { AclEditorDialog } from './acl-editor';
 import { ReferenceDecisionDialog, VersionDecisionDialog } from './decision-panel';
 import { EditDocumentDialog, NewVersionDialog, ReferenceChangeDialog } from './document-forms';
 import { FolderPickerDialog } from './folder-picker';
-import { has, isPreviewable, useApprovals, useCsoRun, useCsoRunToast, versionRights } from './lib';
+import { has, isPreviewable, useApprovals, useCsoRun, useCsoRunToast, versionOutcome, versionRights } from './lib';
 import { CsoPreviewDialog } from './preview';
 import { ShareDialog } from './share-dialog';
 import type { CsoAction, CsoDocumentDetail, CsoVersion } from './types';
@@ -90,9 +90,14 @@ export function VersionsList({ doc, actions, compact = false }: { doc: CsoDocume
                   {canSubmit && (
                     <Button
                       size="sm"
-                      onClick={() => runToast(() => api.post(`/cso/versions/${v.id}/submit`, { expectedLockVersion: v.lockVersion }), can('cso.self_approve') ? `Version ${v.versionNo} publiée (sans approbation)` : `Version ${v.versionNo} soumise pour approbation`)}
+                      onClick={() =>
+                        runToast(
+                          () => api.post<CsoVersion>(`/cso/versions/${v.id}/submit`, { expectedLockVersion: v.lockVersion }),
+                          (res) => `Version ${v.versionNo} ${versionOutcome(res.status)}`,
+                        )
+                      }
                     >
-                      <Send className="h-4 w-4" aria-hidden /> Soumettre
+                      <Send className="h-4 w-4" aria-hidden /> {can('cso.self_approve') ? 'Publier' : 'Soumettre'}
                     </Button>
                   )}
                   {decidableVersion?.id === v.id && (
@@ -333,7 +338,7 @@ export function DocumentActions({
           onConfirm={async (t) => {
             const created = await run(
               () => api.post<CsoDocumentDetail>(`/cso/documents/${doc.id}/copy`, { targetFolderId: t.folderId, title: copyTitle.trim() || undefined }),
-              (d) => `Copie créée${d.reference ? ` (${d.reference})` : ''} — en attente d'approbation`,
+              (d) => `Copie créée${d.reference ? ` (${d.reference})` : ''} — ${d.status === 'PUBLISHED' ? 'publiée directement' : "en attente d'approbation"}`,
             );
             router.push(`/cso/documents/${created.id}`);
           }}
@@ -358,7 +363,7 @@ export function DocumentActions({
         open={dialog === 'archive'}
         onOpenChange={close}
         title="Archiver ce document ?"
-        description="Le document n'est jamais supprimé : il reste consultable par les personnes autorisées aux archives et peut être restauré (nouvelle approbation requise)."
+        description="Le document n'est jamais supprimé : il reste consultable par les personnes autorisées aux archives et peut être restauré (nouvelle approbation requise ; retour en brouillon s'il n'a jamais été approuvé). Ses partages actifs sont révoqués."
         confirmLabel="Archiver"
         tone="danger"
         requireReason
@@ -370,11 +375,18 @@ export function DocumentActions({
         open={dialog === 'restore'}
         onOpenChange={close}
         title="Restaurer ce document ?"
-        description="Une version de restauration sera soumise à une nouvelle approbation avant republication."
+        description={
+          doc.restoreMode === 'DRAFT'
+            ? "Ce document n'a jamais été approuvé : il reviendra en brouillon avec son dernier fichier, que vous pourrez soumettre ou annuler."
+            : 'Une version de restauration sera soumise à une nouvelle approbation avant republication.'
+        }
         confirmLabel="Restaurer"
         requireReason
         onConfirm={async (reason) => {
-          await run(() => api.post(`/cso/documents/${doc.id}/restore`, { reason }), 'Document restauré — en attente de nouvelle approbation');
+          await run(
+            () => api.post<{ restoredAs: 'DRAFT' | 'PENDING_APPROVAL' }>(`/cso/documents/${doc.id}/restore`, { reason }),
+            (r) => (r.restoredAs === 'DRAFT' ? 'Document restauré en brouillon (jamais approuvé)' : 'Document restauré — en attente de nouvelle approbation'),
+          );
         }}
       />
     </>

@@ -46,7 +46,7 @@ export function readSearchParams(sp: URLSearchParams): CsoSearchParams {
 }
 
 /**
- * Recherche CSO (CSO-013) : texte (nom, référence, description, contenu indexé) + filtres
+ * Recherche CSO (CSO-013) : texte (nom, référence, description — pas le contenu des fichiers) + filtres
  * navire / bibliothèque / dossier / catégorie / statut / auteur / dates / champ personnalisé.
  * Résultats filtrés par droits AVANT réponse ; pagination serveur par curseur opaque.
  */
@@ -88,7 +88,7 @@ export function CsoSearch({ params, onChange }: { params: CsoSearchParams; onCha
           <Field label="Rechercher" htmlFor={ids.q} className="min-w-[240px] flex-[2]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-soft" aria-hidden />
-              <Input id={ids.q} value={draft.q ?? ''} onChange={(e) => set('q', e.target.value)} placeholder="Titre, référence, description…" className="pl-8" maxLength={200} />
+              <Input id={ids.q} value={draft.q ?? ''} onChange={(e) => set('q', e.target.value)} placeholder="Titre, référence ou description" title="Le contenu des fichiers n'est pas indexé" className="pl-8" maxLength={200} />
             </div>
           </Field>
           {me.accessibleVessels.length > 0 && (

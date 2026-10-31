@@ -27,6 +27,10 @@ function NoonReportsList() {
   const [reportType, setReportType] = useState(sp.get('reportType') ?? '');
   const [from, setFrom] = useState(sp.get('from') ?? '');
   const [to, setTo] = useState(sp.get('to') ?? '');
+  // Brouillons oubliés (audit FLT-25)
+  const [staleDrafts, setStaleDrafts] = useState(sp.get('staleDraftDays') ?? '');
+  // Audit FLT-12 : le filtre Voyage n'est proposé qu'avec voyages.view
+  const canVoyages = can('voyages.view');
 
   useEffect(() => {
     if (!sp.get('vesselId')) setVesselId(currentVessel?.id ?? '');
@@ -47,10 +51,11 @@ function NoonReportsList() {
       reportType: reportType || undefined,
       from: from || undefined,
       to: to || undefined,
+      staleDraftDays: staleDrafts || undefined,
     },
     can('noon.view'),
   );
-  const filtered = !!(vesselId || voyageId || status || reportType || from || to);
+  const filtered = !!(vesselId || voyageId || status || reportType || from || to || staleDrafts);
 
   if (!can('noon.view')) return <Forbidden />;
   return (
@@ -87,20 +92,22 @@ function NoonReportsList() {
             ))}
           </Select>
         </div>
-        <div className="w-full sm:w-52">
-          <label className="field-label" htmlFor="nr-voyage">
-            Voyage
-          </label>
-          <Select id="nr-voyage" value={voyageId} onChange={(e) => setVoyageId(e.target.value)}>
-            <option value="">Tous</option>
-            {voyages.data?.items.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.reference}
-                {vesselId ? '' : ` — ${v.vessel.name}`}
-              </option>
-            ))}
-          </Select>
-        </div>
+        {canVoyages && (
+          <div className="w-full sm:w-52">
+            <label className="field-label" htmlFor="nr-voyage">
+              Voyage
+            </label>
+            <Select id="nr-voyage" value={voyageId} onChange={(e) => setVoyageId(e.target.value)}>
+              <option value="">Tous</option>
+              {voyages.data?.items.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.reference}
+                  {vesselId ? '' : ` — ${v.vessel.name}`}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
         <div className="w-full sm:w-44">
           <label className="field-label" htmlFor="nr-status">
             Statut
@@ -127,6 +134,17 @@ function NoonReportsList() {
             ))}
           </Select>
         </div>
+        <div className="w-full sm:w-48">
+          <label className="field-label" htmlFor="nr-stale">
+            Brouillons
+          </label>
+          <Select id="nr-stale" value={staleDrafts} onChange={(e) => setStaleDrafts(e.target.value)}>
+            <option value="">Tous les rapports</option>
+            <option value="2">Inchangés depuis 2 jours</option>
+            <option value="7">Inchangés depuis 7 jours</option>
+            <option value="30">Inchangés depuis 30 jours</option>
+          </Select>
+        </div>
         <div className="w-[calc(50%-4px)] sm:w-40">
           <label className="field-label" htmlFor="nr-from">
             Du (UTC)
@@ -149,6 +167,7 @@ function NoonReportsList() {
               setReportType('');
               setFrom('');
               setTo('');
+              setStaleDrafts('');
             }}
           >
             <X className="h-4 w-4" aria-hidden /> Réinitialiser

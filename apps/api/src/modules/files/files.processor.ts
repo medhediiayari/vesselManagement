@@ -3,7 +3,7 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { QUEUES } from '../jobs/queues';
+import { QUEUES, SCHEDULED_JOBS } from '../jobs/queues';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AntivirusService } from './antivirus.service';
 import { FilesService, ORPHAN_TTL_HOURS } from './files.service';
@@ -105,12 +105,33 @@ export class FilesProcessor extends WorkerHost {
     return { status: verdict.status };
   }
 
+  /** Exécution tracée dans job_runs, comme les tâches du planificateur (ADM-24 : /admin/system n'affiche plus « Jamais »). */
   private async cleanupOrphans() {
+    const run = await this.prisma.jobRun.create({ data: { jobName: SCHEDULED_JOBS.ORPHAN_FILES_CLEANUP, status: 'RUNNING' } });
+    try {
+      const detail = await this.purgeOrphans();
+      await this.prisma.jobRun.update({
+        where: { id: run.id },
+        data: { status: detail.failed ? 'PARTIALLY_FAILED' : 'COMPLETED', finishedAt: new Date(), detail },
+      });
+      return detail;
+    } catch (e) {
+      await this.prisma.jobRun.update({
+        where: { id: run.id },
+        data: { status: 'FAILED', finishedAt: new Date(), detail: { error: String(e).slice(0, 1000) } },
+      });
+      throw e;
+    }
+  }
+
+  private async purgeOrphans() {
     const cutoff = new Date(Date.now() - ORPHAN_TTL_HOURS * 3_600_000);
     const orphans = await this.prisma.storedFile.findMany({
       where: { ownerId: null, deletedAt: null, createdAt: { lt: cutoff }, context: { notIn: ['EXPORT', 'GENERATED'] } },
       take: 500,
     });
+    let purged = 0;
+    let failed = 0;
     for (const f of orphans) {
       try {
         await this.storage.remove(f.bucket, f.objectKey);
@@ -124,10 +145,12 @@ export class FilesProcessor extends WorkerHost {
           vesselId: f.vesselId,
           metadata: { originalName: f.originalName, sha256: f.sha256, uploadedById: f.uploadedById },
         });
+        purged++;
       } catch (e) {
+        failed++;
         this.logger.warn(`Purge orphelin ${f.id} impossible : ${String(e)}`);
       }
     }
-    return { purged: orphans.length };
+    return { purged, failed };
   }
 }

@@ -40,8 +40,16 @@ export class ReceivingController {
   @Post('delivery-notes/onboard')
   @RequirePermissions('receiving.record')
   @ApiHeader({ name: 'Idempotency-Key', required: true, description: 'UUID conseillé : un renvoi ne compte jamais deux fois' })
-  recordOnboard(@Auth() ctx: AuthContext, @Headers('idempotency-key') key: string | undefined, @Body() dto: OnboardDeliveryDto) {
-    return this.receiving.recordOnboard(ctx, key, dto);
+  async recordOnboard(
+    @Auth() ctx: AuthContext,
+    @Headers('idempotency-key') key: string | undefined,
+    @Body() dto: OnboardDeliveryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.receiving.recordOnboard(ctx, key, dto);
+    // Rejeu (même clé, même contenu, y compris envois simultanés) : résultat d'origine en 200 (ACH-09)
+    res.status(result.replay ? 200 : 201);
+    return result;
   }
 
   /** Écart de réception — décision « Attendre le reliquat ». */

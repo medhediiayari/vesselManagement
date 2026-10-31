@@ -9,6 +9,7 @@ import { useSession } from '@/lib/session';
 import { DownloadButton } from '@/components/amc/file-preview';
 import { CsoPreviewDialog } from '@/components/cso/preview';
 import { CsoPageHeader } from '@/components/cso/cso-nav';
+import { isPreviewable } from '@/components/cso/lib';
 import type { SharedWithMeItem } from '@/components/cso/types';
 import { Reference } from '@/components/cso/ui';
 import { Badge } from '@/components/ui/badge';
@@ -88,7 +89,7 @@ export default function SharedWithMePage() {
             header: <span className="sr-only">Actions</span>,
             cell: (r) => (
               <div className="flex justify-end gap-1">
-                {can('cso.preview') && (
+                {r.canPreview && isPreviewable(r.document.fileKind) && (
                   <Button variant="ghost" size="sm" onClick={() => setPreview(r)}>
                     <Eye className="h-4 w-4" aria-hidden /> Aperçu
                   </Button>
@@ -107,6 +108,7 @@ export default function SharedWithMePage() {
           previewPath={`/cso/documents/${preview.document.id}/preview`}
           downloadPath={`/cso/documents/${preview.document.id}/download`}
           canDownload={preview.canDownload}
+          kind={preview.document.fileKind}
         />
       )}
     </>

@@ -5,6 +5,8 @@ import {
   AclNode,
   CSO_ACTIONS,
   aclDecision,
+  ancestorsReadable,
+  breaksWithoutViewRule,
   canAccessVersion,
   canSeeDocument,
   chainFromPath,
@@ -94,12 +96,51 @@ describe('CSO ACL — héritage et rupture', () => {
   });
 
   it('inheritAcl=false : le nœud garde ses entrées mais coupe les ancêtres', () => {
-    const chain = [node([], false), node([allow('DEPARTMENT', OTHER_DEPT, ['view'])])];
-    expect(collectEntries(chain)).toHaveLength(0);
-    expect(run({ chain }).view).toBe(true);
+    const chain = [node([allow('USER', USER, ['view'])], false), node([allow('DEPARTMENT', OTHER_DEPT, ['download'])])];
+    expect(collectEntries(chain).map((e) => e.principalId)).toEqual([USER]);
+    const eff = run({ chain });
+    expect(eff.view).toBe(true);
+    expect(eff.download).toBe(true); // l'ALLOW restrictif ancestral n'est plus hérité
+  });
 
-    const chain2 = [node([allow('USER', USER, ['view'])], false), node([deny('USER', USER, ['view'])])];
-    expect(run({ chain: chain2 }).view).toBe(true); // le DENY ancestral n'est plus hérité
+  it('CSO-02 : une rupture d’héritage ne rend jamais visible un élément sous un dossier caché', () => {
+    // Sous-dossier « ouvert » (aucune règle view) sous un parent réservé à un autre département
+    const hiddenParent = [node([allow('ROLE', ROLE, ['edit', 'acl_manage'])], false), node([allow('DEPARTMENT', OTHER_DEPT, ['view'])])];
+    expect(run({ chain: hiddenParent, target: 'folder' }).view).toBe(false);
+    expect(grantedActions(run({ chain: hiddenParent, target: 'folder' }))).toEqual([]);
+    // Parent en DENY explicite : même un ALLOW sur l'enfant ne suffit pas
+    const deniedParent = [node([allow('USER', USER, ['view'])], false), node([deny('USER', USER, ['view'])])];
+    expect(run({ chain: deniedParent, target: 'folder' }).view).toBe(false);
+    // Document dans un sous-dossier dont un ancêtre lointain est caché
+    const deepDoc = [node(), node([], false), node(), node([allow('DEPARTMENT', OTHER_DEPT, ['view'])])];
+    expect(run({ chain: deepDoc }).view).toBe(false);
+    // Parents lisibles : la rupture s'applique normalement
+    const readable = [node([allow('USER', USER, ['view'])], false), node([allow('ROLE', ROLE, ['view'])])];
+    expect(ancestorsReadable({ chain: readable, principals, target: 'folder' })).toBe(true);
+    expect(run({ chain: readable, target: 'folder' }).view).toBe(true);
+  });
+
+  it('CSO-02 : seule une exception nommant l’utilisateur sur le document lui-même ouvre un document sous un dossier restreint', () => {
+    const restrictedFolder = node([allow('DEPARTMENT', OTHER_DEPT, ['view'])]);
+    expect(run({ chain: [node([allow('USER', USER, ['view'])], false), restrictedFolder] }).view).toBe(true);
+    // Le même ALLOW posé sur un sous-dossier en rupture ne suffit pas (accès direct au dossier comme recherche)
+    expect(run({ chain: [node(), node([allow('USER', USER, ['view'])], false), restrictedFolder] }).view).toBe(false);
+    // Jamais contre un refus explicite d'un dossier parent
+    expect(run({ chain: [node([allow('USER', USER, ['view'])], false), node([deny('USER', USER, ['view'])])] }).view).toBe(false);
+  });
+
+  it('CSO-02 : le partage d’un document reste possible sous un dossier caché', () => {
+    const chain = [node(), node([allow('DEPARTMENT', OTHER_DEPT, ['view'])], false), node()];
+    expect(run({ chain }).view).toBe(false);
+    expect(grantedActions(run({ chain, shares: [{ allowDownload: false }] }))).toEqual(['view', 'preview']);
+  });
+
+  it('CSO-02 : rupture d’héritage sans règle Autoriser « view » détectée', () => {
+    expect(breaksWithoutViewRule(false, [allow('ROLE', ROLE, ['edit', 'acl_manage'])])).toBe(true);
+    expect(breaksWithoutViewRule(false, [deny('ROLE', ROLE, ['view'])])).toBe(true);
+    expect(breaksWithoutViewRule(false, [])).toBe(true);
+    expect(breaksWithoutViewRule(false, [allow('ROLE', ROLE, ['view', 'edit'])])).toBe(false);
+    expect(breaksWithoutViewRule(true, [])).toBe(false);
   });
 
   it('la rupture sur un dossier intermédiaire arrête la collecte au-dessus de lui', () => {

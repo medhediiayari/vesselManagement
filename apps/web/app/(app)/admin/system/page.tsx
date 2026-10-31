@@ -28,7 +28,38 @@ const JOB_LABELS: Record<string, string> = {
   'purchasing-followup': 'Suivi achats',
   'voyage-notices': 'Notices de voyage',
   'orphan-files-cleanup': 'Purge des dépôts non rattachés',
-  'outbox-dispatch': 'Diffusion des événements',
+};
+
+/** Libellés des statuts techniques (ADM-24) : jamais de code brut à l'écran. */
+const JOB_STATUS_LABELS: Record<string, string> = {
+  QUEUED: 'En file',
+  RUNNING: 'En cours',
+  COMPLETED: 'Terminée',
+  PARTIALLY_FAILED: 'Partiellement en échec',
+  FAILED: 'En échec',
+  CANCELLED: 'Annulée',
+};
+const EMAIL_STATUS_LABELS: Record<string, string> = {
+  QUEUED: 'En file',
+  SENT: 'Envoyés',
+  FAILED: 'En échec',
+  SUPPRESSED: 'Non envoyés (désactivés)',
+};
+const SCAN_STATUS_LABELS: Record<string, string> = {
+  PENDING: 'Analyse en attente',
+  CLEAN: 'Sains',
+  INFECTED: 'En quarantaine',
+  SKIPPED: 'Non analysés',
+  ERROR: 'Erreur d’analyse',
+};
+const FILE_KIND_LABELS: Record<string, string> = {
+  PDF: 'PDF',
+  EXCEL: 'Excel',
+  IMAGE: 'Image',
+  ZIP: 'Archive ZIP',
+  CSV: 'CSV',
+  WORD: 'Word',
+  OTHER: 'Autre',
 };
 
 /** Exploitation : dépendances, jobs planifiés, e-mails, antivirus, stockage MinIO. */
@@ -68,9 +99,9 @@ export default function SystemPage() {
                 <tr key={j.name}>
                   <td>{JOB_LABELS[j.name] ?? j.name}</td>
                   <td className="tabular">{fmtDateTime(j.lastRun?.started_at)}</td>
-                  <td>{j.lastRun ? <Badge tone={defaultTone(j.lastRun.status)}>{j.lastRun.status}</Badge> : <Badge tone="neutral">Jamais</Badge>}</td>
+                  <td>{j.lastRun ? <Badge tone={defaultTone(j.lastRun.status)}>{JOB_STATUS_LABELS[j.lastRun.status] ?? j.lastRun.status}</Badge> : <Badge tone="neutral">Jamais</Badge>}</td>
                   <td className="text-right">
-                    {j.name !== 'orphan-files-cleanup' && j.name !== 'outbox-dispatch' && (
+                    {j.name !== 'orphan-files-cleanup' && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -95,7 +126,7 @@ export default function SystemPage() {
         </Panel>
         <Panel title="E-mails">
           <div className="mb-3 flex flex-wrap gap-2">
-            {Object.entries(d.emails).map(([k, v]) => <Badge key={k} tone={defaultTone(k)}>{k} : {v}</Badge>)}
+            {Object.entries(d.emails).map(([k, v]) => <Badge key={k} tone={defaultTone(k)}>{EMAIL_STATUS_LABELS[k] ?? k} : {v}</Badge>)}
             {!Object.keys(d.emails).length && <span className="text-sm text-ink-muted">Aucun envoi.</span>}
           </div>
           {d.failedEmails.length > 0 && (
@@ -110,13 +141,13 @@ export default function SystemPage() {
         </Panel>
         <Panel title="Fichiers (MinIO)">
           <div className="mb-3 flex flex-wrap gap-2">
-            {Object.entries(d.fileScans).map(([k, v]) => <Badge key={k} tone={defaultTone(k)}>{k} : {v}</Badge>)}
+            {Object.entries(d.fileScans).map(([k, v]) => <Badge key={k} tone={defaultTone(k)}>{SCAN_STATUS_LABELS[k] ?? k} : {v}</Badge>)}
           </div>
           <table className="table-amc">
             <thead><tr><th>Type</th><th className="text-right">Fichiers</th><th className="text-right">Volume</th></tr></thead>
             <tbody>
               {d.filesByKind.map((f) => (
-                <tr key={f.kind}><td>{f.kind}</td><td className="text-right tabular">{f.count}</td><td className="text-right tabular">{fmtBytes(f.bytes)}</td></tr>
+                <tr key={f.kind}><td>{FILE_KIND_LABELS[f.kind] ?? f.kind}</td><td className="text-right tabular">{f.count}</td><td className="text-right tabular">{fmtBytes(f.bytes)}</td></tr>
               ))}
             </tbody>
           </table>

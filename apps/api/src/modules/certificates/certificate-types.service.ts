@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrincipalType, Prisma } from '@prisma/client';
 import { Errors } from '../../common/errors';
 import { Db, PrismaService } from '../../prisma/prisma.service';
 import { AuthContext, can } from '../access/auth-context';
 import { AuditService, diffFields } from '../audit/audit.service';
 import { CertificateAccessService } from './certificate-access.service';
+import { CertificateTreeService } from './certificate-tree.service';
+import { CertificateWorkflowService } from './certificate-workflow.service';
 import { TYPES_MANAGE_PERMISSION } from './certificate.logic';
 import {
   CreateCertificateTypeDto,
@@ -55,10 +57,14 @@ function dedupePrincipals(list: PrincipalInput[]): PrincipalInput[] {
  */
 @Injectable()
 export class CertificateTypesService {
+  private readonly logger = new Logger(CertificateTypesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly certAccess: CertificateAccessService,
+    private readonly tree: CertificateTreeService,
+    private readonly workflow: CertificateWorkflowService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -111,6 +117,8 @@ export class CertificateTypesService {
     const id = await this.prisma.$transaction(async (tx) => {
       if (data.reminderPolicyId) await this.assertPolicyExists(tx, data.reminderPolicyId);
       await this.assertPrincipalsExist(tx, principals);
+      await this.assertEffectiveValidators(tx, principals);
+      data.category = await this.tree.ensureCategory(tx, data.category, ctx.userId);
       const created = await tx.certificateType.create({
         data: { ...data, validators: { create: principals } },
         include: TYPE_INCLUDE,
@@ -144,7 +152,13 @@ export class CertificateTypesService {
     }
     await this.prisma.$transaction(async (tx) => {
       if (dto.reminderPolicyId) await this.assertPolicyExists(tx, dto.reminderPolicyId);
-      const after = await tx.certificateType.update({ where: { id }, data: dto as Prisma.CertificateTypeUncheckedUpdateInput });
+      // Catégorie existante à la casse près : son nom de référence est repris (CRT-07)
+      const category =
+        dto.category && dto.category !== before.category ? await this.tree.ensureCategory(tx, dto.category, ctx.userId) : dto.category;
+      const after = await tx.certificateType.update({
+        where: { id },
+        data: { ...dto, ...(category === undefined ? {} : { category }) } as Prisma.CertificateTypeUncheckedUpdateInput,
+      });
       const { validators: _v, reminderPolicy: _p, ...plainBefore } = before;
       const diff = diffFields(plainBefore as Record<string, unknown>, after as unknown as Record<string, unknown>);
       delete (diff.before as Record<string, unknown> | undefined)?.updatedAt;
@@ -158,7 +172,10 @@ export class CertificateTypesService {
     return this.getType(ctx, id);
   }
 
-  /** Remplace les validateurs éligibles du type (ADM-051) — changement audité (CDC §4.6). */
+  /**
+   * Remplace les validateurs éligibles du type (ADM-051) — changement audité (CDC §4.6). Les
+   * demandes déjà en attente suivent la nouvelle désignation (CRT-03).
+   */
   async setValidators(ctx: AuthContext, id: string, list: PrincipalInput[]) {
     const type = await this.prisma.certificateType.findUnique({ where: { id }, include: { validators: true } });
     if (!type) throw Errors.notFound('Type de certificat');
@@ -166,6 +183,7 @@ export class CertificateTypesService {
     if (samePrincipals(type.validators, principals)) return this.getType(ctx, id);
     await this.prisma.$transaction(async (tx) => {
       await this.assertPrincipalsExist(tx, principals);
+      await this.assertEffectiveValidators(tx, principals);
       await tx.certificateTypeValidator.deleteMany({ where: { typeId: id } });
       if (principals.length) {
         await tx.certificateTypeValidator.createMany({ data: principals.map((p) => ({ ...p, typeId: id })) });
@@ -183,7 +201,37 @@ export class CertificateTypesService {
         tx,
       );
     });
-    return this.getType(ctx, id);
+    // Après validation : peut porter sur de nombreuses demandes (hors délai de transaction) ; un
+    // échec de notification ne remet pas en cause la nouvelle désignation, déjà enregistrée
+    const realigned = await this.workflow.realignPendingValidators(ctx, id).catch((e: unknown) => {
+      this.logger.error(`Réaffectation des demandes en attente du type ${id} échouée : ${String(e)}`);
+      return null;
+    });
+    return { ...(await this.getType(ctx, id)), realigned };
+  }
+
+  /**
+   * Contrôle d'une liste de validateurs avant enregistrement (sélecteur) : nombre de personnes
+   * désignées ayant réellement le droit d'approuver, par principal (CRT-02).
+   */
+  async checkValidators(list: PrincipalInput[]) {
+    const principals = dedupePrincipals(list);
+    const { total, byPrincipal } = await this.certAccess.effectiveApprovers(this.prisma, principals);
+    return {
+      effectiveApprovers: total,
+      principals: principals.map((p) => ({ ...p, approverCount: byPrincipal.get(`${p.principalType}:${p.principalId}`) ?? 0 })),
+    };
+  }
+
+  /** Des validateurs désignés sans aucun droit d'approbation bloqueraient toutes les demandes du type (CRT-02). */
+  private async assertEffectiveValidators(db: Db, principals: PrincipalInput[]) {
+    if (!principals.length) return;
+    const { total, byPrincipal } = await this.certAccess.effectiveApprovers(db, principals);
+    if (total > 0) return;
+    throw Errors.business(
+      "Aucun des validateurs désignés n'a le droit « Approuver les certificats » : les demandes de ce type resteraient bloquées. Ajoutez un validateur habilité ou accordez-lui ce droit.",
+      { principals: principals.filter((p) => !byPrincipal.get(`${p.principalType}:${p.principalId}`)) },
+    );
   }
 
   // ---------------------------------------------------------------------------

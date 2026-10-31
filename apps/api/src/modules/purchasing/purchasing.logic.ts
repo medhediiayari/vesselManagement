@@ -101,7 +101,8 @@ export const PR_TRANSITIONS: TransitionTable<PrStatus> = {
   ORDERED: ['APPROVED', 'SOURCING', 'PARTIALLY_ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'REVISED', 'CLOSED'],
   PARTIALLY_RECEIVED: ['PARTIALLY_ORDERED', 'ORDERED', 'RECEIVED', 'REVISED', 'CLOSED'],
   RECEIVED: ['PARTIALLY_RECEIVED', 'CLOSED'],
-  ON_HOLD: ['UNDER_REVIEW', 'APPROVED', 'SOURCING', 'PARTIALLY_ORDERED', 'CANCELLED'],
+  // Reprise au statut d'avancement dérivé : des BC ont pu être émis, livrés ou clôturés pendant l'attente (ACH-02)
+  ON_HOLD: ['UNDER_REVIEW', 'APPROVED', 'SOURCING', 'PARTIALLY_ORDERED', 'ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CLOSED', 'CANCELLED'],
   // PR mère : clôturée automatiquement quand toutes ses sous-PR sont terminées
   SPLIT: ['CLOSED'],
   CLOSED: [],
@@ -1109,6 +1110,18 @@ export interface InvoiceMatchResult {
   suggestion: 'MATCHED' | 'DISPUTED';
   reasons: ('CURRENCY_MISMATCH' | 'EXCEEDS_ORDERED' | 'EXCEEDS_RECEIVED' | 'NO_ORDER')[];
   byCurrency: Record<string, { ordered: string; received: string; invoiced: string }>;
+}
+
+/** Libellés FR des motifs d'écart (notifications, messages d'erreur — audit UI-02). */
+export const INVOICE_MATCH_REASON_LABELS: Record<InvoiceMatchResult['reasons'][number], string> = {
+  CURRENCY_MISMATCH: 'devise différente de celle du BC',
+  EXCEEDS_ORDERED: 'dépasse le montant commandé',
+  EXCEEDS_RECEIVED: 'dépasse la valeur reçue à bord',
+  NO_ORDER: 'aucun BC rattaché',
+};
+
+export function invoiceMatchReasonsText(reasons: InvoiceMatchResult['reasons']): string {
+  return reasons.map((r) => INVOICE_MATCH_REASON_LABELS[r] ?? r).join(', ');
 }
 
 export function suggestInvoiceMatch(invoiceCurrency: string, orders: InvoiceOrderFacts[]): InvoiceMatchResult {

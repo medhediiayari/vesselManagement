@@ -1,7 +1,8 @@
 'use client';
 
+import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, Plus, X } from 'lucide-react';
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { ApiError, api, errorMessage } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -16,6 +17,7 @@ import {
   type ReminderFrequency,
   type ReminderPolicyDto,
   type SubjectKind,
+  type ValidatorCheckDto,
 } from './types';
 
 const samePrincipals = (a: PrincipalDto[], b: PrincipalDto[]) => {
@@ -97,6 +99,25 @@ export function TypeFormDialog({
   const ids = { kind: useId(), desc: useId(), policy: useId(), cats: useId() };
   const locked = !!type && type.certificateCount > 0;
 
+  // Validateurs désignés réellement habilités à approuver (CRT-02)
+  const principals = toPrincipalInput(validators);
+  const check = useQuery({
+    queryKey: ['certificate-types', 'validators-check', principals.map((p) => `${p.principalType}:${p.principalId}`).sort().join(',')],
+    queryFn: () => api.post<ValidatorCheckDto>('/certificate-types/validators/check', { principals }),
+    enabled: open && !readOnly && principals.length > 0,
+    staleTime: 30_000,
+  });
+  const noEffectiveValidator = principals.length > 0 && check.data?.effectiveApprovers === 0;
+  const validatorWarnings = useMemo(
+    () =>
+      new Map(
+        (check.data?.principals ?? [])
+          .filter((p) => p.approverCount === 0)
+          .map((p) => [`${p.principalType}:${p.principalId}`, p.principalType === 'USER' ? 'sans droit d’approbation' : 'personne n’a le droit d’approuver'] as const),
+      ),
+    [check.data],
+  );
+
   useEffect(() => {
     if (!open) return;
     setCode(type?.code ?? '');
@@ -124,6 +145,10 @@ export function TypeFormDialog({
     setErrors(local);
     setFormError(null);
     if (Object.keys(local).length) return;
+    if (noEffectiveValidator) {
+      setFormError('Aucun des validateurs désignés n’a le droit « Approuver les certificats » : les demandes de ce type resteraient bloquées.');
+      return;
+    }
     const fields = {
       code: code.trim().toUpperCase(),
       name: name.trim(),
@@ -144,10 +169,18 @@ export function TypeFormDialog({
         toast.success('Type de certificat créé');
       } else {
         await api.patch(`/certificate-types/${type.id}`, fields);
+        let realigned: { pendingRequests: number; notifiedValidators: number } | undefined;
         if (!samePrincipals(type.validators ?? [], validators)) {
-          await api.put(`/certificate-types/${type.id}/validators`, { principals: toPrincipalInput(validators) });
+          const res = await api.put<{ realigned?: typeof realigned }>(`/certificate-types/${type.id}/validators`, {
+            principals: toPrincipalInput(validators),
+          });
+          realigned = res.realigned;
         }
-        toast.success('Type de certificat mis à jour', { description: 'Modification journalisée dans l’audit.' });
+        toast.success('Type de certificat mis à jour', {
+          description: realigned?.pendingRequests
+            ? `${realigned.pendingRequests} demande(s) en attente réaffectée(s) : ${realigned.notifiedValidators} nouveau(x) validateur(s) notifié(s).`
+            : 'Modification journalisée dans l’audit.',
+        });
       }
       await onSaved();
       onOpenChange(false);
@@ -253,8 +286,16 @@ export function TypeFormDialog({
             value={validators}
             onChange={setValidators}
             disabled={readOnly}
+            warnings={validatorWarnings}
             emptyHint="Aucun validateur désigné : tout utilisateur habilité à approuver et ayant accès au certificat est éligible."
           />
+          {noEffectiveValidator && (
+            <p role="alert" className="flex items-start gap-2 rounded-md border border-warn-line bg-warn-bg px-3 py-2 text-sm text-warn">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              Aucun validateur désigné n’a le droit « Approuver les certificats » : les demandes de ce type resteraient bloquées. Ajoutez une personne
+              habilitée ou accordez-lui ce droit (Administration → rôles).
+            </p>
+          )}
         </Section>
       </fieldset>
     </Dialog>

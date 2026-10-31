@@ -5,15 +5,19 @@ import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError, errorMessage } from '@/lib/api';
 import { fmtDate } from '@/lib/format';
-import type { CertificateData, ExpiryKind, WorkflowResult } from './types';
+import type { CertificateData, ExpiryKind, RequestKind, WorkflowResult } from './types';
 
 /** Clés de cache partagées par les écrans Certificats. */
 export const certKeys = {
   list: ['certificates'] as const,
+  /** Préfixe de toutes les fiches (renommage d'un dossier / d'une catégorie affichés dessus) */
+  details: ['certificate'] as const,
   detail: (id: string) => ['certificate', id] as const,
   requests: ['certificate-requests'] as const,
   types: ['certificate-types'] as const,
   policies: ['reminder-policies'] as const,
+  folders: ['certificate-folders'] as const,
+  categories: ['certificate-categories'] as const,
 };
 
 /** Rafraîchit fiche + listes + compteurs (dashboard) après une commande de workflow. */
@@ -25,12 +29,21 @@ export function useRefreshCertificates() {
         certificateId ? qc.invalidateQueries({ queryKey: certKeys.detail(certificateId) }) : Promise.resolve(),
         qc.invalidateQueries({ queryKey: certKeys.list }),
         qc.invalidateQueries({ queryKey: certKeys.requests }),
+        qc.invalidateQueries({ queryKey: certKeys.folders }),
         qc.invalidateQueries({ queryKey: ['dashboard'] }),
         qc.invalidateQueries({ queryKey: ['audit'] }),
       ]);
     },
     [qc],
   );
+}
+
+/**
+ * Publication directe (miroir de canSelfApprove côté API) : self_approve pour toute demande,
+ * renewal.self_approve pour les seuls renouvellements. Elle vaut soumission.
+ */
+export function selfApproves(can: (permission: string) => boolean, kind: RequestKind): boolean {
+  return can('certificates.self_approve') || (kind === 'RENEWAL' && can('certificates.renewal.self_approve'));
 }
 
 /** Date civile ISO (API) -> valeur d'<input type="date"> (AAAA-MM-JJ). */

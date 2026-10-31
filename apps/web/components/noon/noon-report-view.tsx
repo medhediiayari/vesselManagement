@@ -8,6 +8,7 @@ import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError, api } from '@/lib/api';
 import { fmtDateTime } from '@/lib/format';
+import { useSession } from '@/lib/session';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
@@ -60,6 +61,11 @@ function issuesFromError(e: unknown): NoonIssue[] {
  */
 export function NoonReportView({ report, refetch }: { report: NoonReportDetail; refetch: () => Promise<unknown> }) {
   const qc = useQueryClient();
+  const { can } = useSession();
+  // Audit FLT-12 : sans voyages.view, le voyage est cité sans lien (évite « Accès refusé »)
+  const canVoyages = can('voyages.view');
+  const warnings = report.submissionWarnings ?? [];
+  const canDiscard = report.permissions.discard ?? (report.status === 'DRAFT' && report.currentRevisionNo === 0 && report.permissions.edit);
   const [correcting, setCorrecting] = useState(false);
   const canCorrectSubmitted = report.permissions.correct && report.status !== 'CORRECTION_REQUESTED';
   const mode = report.permissions.edit ? 'autosave' : correcting && canCorrectSubmitted ? 'local' : 'readonly';
@@ -174,9 +180,13 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
       </span>
       <span>
         Voyage{' '}
-        <Link href={`/voyages/${report.voyage.id}?tab=noon`} className="font-medium text-action hover:underline">
-          {report.voyage.reference}
-        </Link>
+        {canVoyages ? (
+          <Link href={`/voyages/${report.voyage.id}?tab=noon`} className="ref font-medium text-action hover:underline">
+            {report.voyage.reference}
+          </Link>
+        ) : (
+          <span className="ref font-medium">{report.voyage.reference}</span>
+        )}
       </span>
       <span className="tabular text-ink-muted">Heure locale : {mode === 'readonly' ? report.reportDateLocal : localLabel(draft.apiValues.reportDateUtc as string | null, Number(draft.values.utcOffsetMinutes || 0))}</span>
     </span>
@@ -187,7 +197,7 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
       <PageHeader
         breadcrumb={[
           { label: 'Noon Reports', href: '/noon-reports' },
-          { label: report.voyage.reference, href: `/voyages/${report.voyage.id}?tab=noon` },
+          { label: report.voyage.reference, href: canVoyages ? `/voyages/${report.voyage.id}?tab=noon` : undefined },
           { label: `${REPORT_TYPE_LABELS[report.reportType]} ${report.reportDateUtc.slice(0, 10)}` },
         ]}
         title={
@@ -207,7 +217,7 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
         actions={
           <>
             {report.permissions.export && report.currentRevisionNo > 0 && <NoonPdfButton reportId={report.id} revisionNo={report.currentRevisionNo} label="Aperçu PDF" size="md" />}
-            {report.status === 'DRAFT' && report.currentRevisionNo === 0 && report.permissions.edit && (
+            {report.status === 'DRAFT' && report.currentRevisionNo === 0 && canDiscard && (
               <Button variant="ghost" onClick={() => setDiscardOpen(true)}>
                 <Trash2 className="h-4 w-4" aria-hidden /> Supprimer le brouillon
               </Button>
@@ -251,6 +261,11 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
                 ? 'Modifiez les valeurs (enregistrement automatique) puis « Soumettre la correction » avec un motif : une nouvelle révision et son PDF seront créés, la révision d’origine reste intacte.'
                 : `En attente de la correction par le bord. La révision ${report.currentRevisionNo} reste consultable et intacte.`}
             </p>
+          </Notice>
+        )}
+        {report.status === 'DRAFT' && report.voyageOpen === false && (
+          <Notice tone="warn" title="Voyage clôturé ou annulé">
+            Ce brouillon ne peut plus être modifié ni soumis. {canDiscard ? 'Supprimez-le s’il n’a plus d’utilité.' : 'Seul son auteur ou un correcteur habilité peut le supprimer.'}
           </Notice>
         )}
         {report.status === 'DRAFT' && !report.permissions.submit && report.permissions.edit && (
@@ -363,6 +378,12 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
               ) : (
                 <IssueList issues={clientIssues} onGo={goTo} />
               )}
+              {warnings.length > 0 && (
+                <div className="mt-3 border-t border-line pt-2">
+                  <p className="mb-1 text-xs font-medium text-ink-muted">À vérifier (non bloquant)</p>
+                  <IssueList issues={warnings} onGo={goTo} />
+                </div>
+              )}
               <p className="mt-2 text-xs text-ink-muted">Pré-contrôle indicatif : la validation définitive est faite par le serveur à la soumission.</p>
             </Panel>
           )}
@@ -383,7 +404,7 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
           toast.success('Brouillon supprimé');
           await qc.invalidateQueries({ queryKey: noonKeys.list });
           qc.removeQueries({ queryKey: noonKeys.detail(report.id) });
-          router.push(`/voyages/${report.voyage.id}?tab=noon`);
+          router.push(canVoyages ? `/voyages/${report.voyage.id}?tab=noon` : '/noon-reports');
         }}
       />
 
@@ -417,6 +438,12 @@ export function NoonReportView({ report, refetch }: { report: NoonReportDetail; 
           <div className="mb-4 rounded-md border border-warn-line bg-warn-bg px-3 py-2">
             <p className="mb-2 text-sm font-medium text-warn">Pré-contrôle : {clientIssues.length} point(s) à compléter</p>
             <IssueList issues={clientIssues} onGo={goTo} />
+          </div>
+        )}
+        {serverIssues.length === 0 && warnings.length > 0 && (
+          <div className="mb-4 rounded-md border border-line bg-surface-sunken px-3 py-2">
+            <p className="mb-2 text-sm font-medium text-ink">À vérifier avant soumission (non bloquant)</p>
+            <IssueList issues={warnings} onGo={goTo} />
           </div>
         )}
         {draft.status === 'invalid' && (

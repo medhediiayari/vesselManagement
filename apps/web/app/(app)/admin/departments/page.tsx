@@ -145,7 +145,12 @@ export default function DepartmentsPage() {
               {members.data?.map((m) => (
                 <li key={m.id} className="flex items-center justify-between py-2 text-sm">
                   <span>
-                    <a href={`/admin/users/${m.id}`} className="font-medium text-action hover:underline">{m.displayName}</a>
+                    {/* Lien vers la fiche seulement avec le droit de la consulter (ADM-30) */}
+                    {can('users.view') ? (
+                      <a href={`/admin/users/${m.id}`} className="font-medium text-action hover:underline">{m.displayName}</a>
+                    ) : (
+                      <span className="font-medium text-ink">{m.displayName}</span>
+                    )}
                     <span className="block text-xs text-ink-muted">{m.jobTitle ?? m.username}</span>
                   </span>
                   {m.isPrimary ? <Badge tone="teal" icon={false}>Principal</Badge> : <Badge tone="neutral" icon={false}>Secondaire</Badge>}

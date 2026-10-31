@@ -168,6 +168,15 @@ export default function PurchasingBoardPage() {
               {d.variances && <CounterTile label="Écarts / manquants ouverts" value={d.variances.open} tone="danger" href={`/purchasing/deliveries?tab=variances&status=OPEN,IN_PROGRESS${vq}`} />}
               {d.variances && <CounterTile label="Réceptions à valider" value={d.variances.receiptsToValidate} tone="warn" href={`/purchasing/deliveries?tab=receipts&status=CONFIRMED${vq}`} />}
               {d.invoices && <CounterTile label="Factures à examiner" value={d.invoices.toReview} tone="warn" href={`/purchasing/invoices?status=RECEIVED,UNDER_REVIEW${vq}`} />}
+              {d.invoices && d.invoices.reconciliationGaps !== undefined && (
+                <CounterTile
+                  label="Factures en écart de rapprochement"
+                  value={d.invoices.reconciliationGapsCapped ? `${d.invoices.reconciliationGaps}+` : d.invoices.reconciliationGaps}
+                  tone="danger"
+                  hint="À examiner : facturé au-delà du commandé ou du reçu, ou devise différente"
+                  href={`/purchasing/invoices?status=RECEIVED,UNDER_REVIEW${vq}`}
+                />
+              )}
               {d.invoices && <CounterTile label="Factures en litige" value={d.invoices.disputed} tone="danger" href={`/purchasing/invoices?status=DISPUTED${vq}`} />}
             </Section>
           )}

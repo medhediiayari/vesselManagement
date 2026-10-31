@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { CertificateRequestKind, Prisma } from '@prisma/client';
+import { CertificateRequestKind, PrincipalType, Prisma } from '@prisma/client';
+import { Errors } from '../../common/errors';
 import { Db, PrismaService } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { AuthContext, can, principalsOf, vesselWhere } from '../access/auth-context';
-import { VISIBLE_ASSIGNMENT_STATUSES, assertMemberVisible, isMemberVisible, memberVisibilityWhere } from '../access/member-access';
+import { VISIBLE_ASSIGNMENT_STATUSES, isMemberVisible, memberVisibilityWhere } from '../access/member-access';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Actor, ValidatorRef, approvalPermissionFor, isEligibleValidator, isRequestSupervisor } from './certificate.logic';
 
@@ -51,15 +52,12 @@ export class CertificateAccessService {
     return { OR: ors };
   }
 
-  /** 403 si le certificat (déjà chargé) est hors des droits de l'appelant — revérifié à chaque appel (CERT-08). */
-  async assertVisible(ctx: AuthContext, cert: CertificateSubjectRef, db: Db = this.prisma): Promise<void> {
-    this.access.assertCan(ctx, CERT_VIEW);
-    if (cert.subjectKind === 'VESSEL') {
-      this.access.assertVesselAccess(ctx, cert.vesselId);
-      return;
-    }
-    this.access.assertCan(ctx, MEMBER_CERT_VIEW);
-    await assertMemberVisible(db, ctx, cert.memberId!);
+  /**
+   * 404 si le certificat (déjà chargé) est hors des droits de l'appelant — revérifié à chaque appel
+   * (CERT-08). Un 403 confirmerait l'existence d'un certificat hors périmètre (audit CRT-15).
+   */
+  async assertVisible(ctx: AuthContext, cert: CertificateSubjectRef, db: Db = this.prisma, what = 'Certificat'): Promise<void> {
+    if (!(await this.isVisible(ctx, cert, db))) throw Errors.notFound(what);
   }
 
   async isVisible(ctx: AuthContext, cert: CertificateSubjectRef, db: Db = this.prisma): Promise<boolean> {
@@ -183,6 +181,25 @@ export class CertificateAccessService {
     const excluded = new Set([request.requestedById, ...(request.uploadedById ? [request.uploadedById] : []), ...excludeUserIds]);
     ids = ids.filter((id) => !excluded.has(id));
     return this.filterReaders(db, cert, ids);
+  }
+
+  /**
+   * Validateurs désignés réellement capables d'approuver (CRT-02) : pour chaque principal, nombre
+   * d'utilisateurs actifs qu'il désigne et qui ont `certificates.approve` (tous navires confondus).
+   */
+  async effectiveApprovers(
+    db: Db,
+    principals: { principalType: PrincipalType; principalId: string }[],
+  ): Promise<{ total: number; byPrincipal: Map<string, number> }> {
+    const members = await Promise.all(
+      principals.map((p) => this.notifications.resolvePrincipals([{ type: p.principalType, id: p.principalId }], db)),
+    );
+    const all = [...new Set(members.flat())];
+    const approvers = new Set(all.length ? await this.access.usersWithPermission('certificates.approve', null, db, all) : []);
+    const byPrincipal = new Map(
+      principals.map((p, i) => [`${p.principalType}:${p.principalId}`, members[i].filter((id) => approvers.has(id)).length]),
+    );
+    return { total: approvers.size, byPrincipal };
   }
 
   /** Permission plateforme exigée des destinataires de notifications sur ce certificat. */

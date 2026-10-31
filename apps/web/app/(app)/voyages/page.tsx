@@ -17,6 +17,7 @@ import { fmtLaycan, fmtUtc } from '@/components/voyages/lib';
 import { VoyageStatusBadge } from '@/components/voyages/status';
 import type { VoyageListItem } from '@/components/voyages/types';
 import { VoyageFormDialog } from '@/components/voyages/voyage-form';
+import { CreatedBy } from '@/components/amc/created-by';
 
 /** Recherche texte différée (évite une requête par frappe). */
 function useDebounced<T>(value: T, ms = 300): T {
@@ -190,6 +191,7 @@ function VoyagesList() {
           { key: 'laycan', header: 'Laycan', cell: (v) => <span className="whitespace-nowrap tabular">{fmtLaycan(v.laycanFrom, v.laycanTo, fmtDate)}</span>, hideBelow: 'lg' },
           { key: 'eta', header: 'ETA', cell: (v) => <span className="whitespace-nowrap tabular">{v.ata ? `ATA ${fmtUtc(v.ata)}` : fmtUtc(v.eta)}</span>, hideBelow: 'md' },
           { key: 'noon', header: 'Noon', cell: (v) => <span className="tabular">{v._count.noonReports}</span>, align: 'right', hideBelow: 'lg' },
+          { key: 'createdBy', header: 'Créé par', cell: (v) => <CreatedBy by={v.createdBy} at={v.createdAt} compact />, hideBelow: 'md' },
         ]}
       />
       {creating && (

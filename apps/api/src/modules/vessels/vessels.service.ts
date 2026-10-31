@@ -9,7 +9,8 @@ import { AuditService, diffFields } from '../audit/audit.service';
 import { FileAccessRegistry } from '../files/file-access.registry';
 import { FilesService, toFileDto } from '../files/files.service';
 import { poOwnFilter, prOwnFilter } from '../purchasing/purchasing-core.service';
-import { AddVesselAttachmentDto, CreateVesselDto, ListVesselsQuery, UpdateVesselDto } from './vessels.dto';
+import { AddVesselAttachmentDto, CreateVesselDto, ListVesselsQuery, UpdateVesselDto, vesselConsistencyErrors } from './vessels.dto';
+import { escapeLike } from '../../common/utils/like';
 
 export const OWNER_VESSEL_PHOTO = 'vessel_photo';
 export const OWNER_VESSEL_ATTACHMENT = 'vessel_attachment';
@@ -63,9 +64,9 @@ export class VesselsService implements OnModuleInit {
         q.search
           ? {
               OR: [
-                { name: { contains: q.search, mode: 'insensitive' } },
-                { code: { contains: q.search.toUpperCase() } },
-                { imoNumber: { contains: q.search } },
+                { name: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { code: { contains: escapeLike(q.search).toUpperCase() } },
+                { imoNumber: { contains: escapeLike(q.search) } },
               ],
             }
           : {},
@@ -94,6 +95,7 @@ export class VesselsService implements OnModuleInit {
 
   /** Création + bibliothèque CSO du navire. Anti-doublon IMO / MMSI / code (contraintes uniques). */
   async create(ctx: AuthContext, dto: CreateVesselDto) {
+    this.assertConsistent(dto);
     await this.assertNoDuplicate(dto);
     const company = await this.prisma.company.findFirstOrThrow({ orderBy: { createdAt: 'asc' } });
     const vessel = await this.prisma.$transaction(async (tx) => {
@@ -113,18 +115,65 @@ export class VesselsService implements OnModuleInit {
   /** Toute modification d'information officielle est historisée (before/after). */
   async update(ctx: AuthContext, id: string, dto: UpdateVesselDto) {
     const before = await this.getAccessible(ctx, id);
+    // Valeurs fusionnées (un PATCH partiel ne doit pas créer d'incohérence), mais seuls les champs
+    // envoyés sont jugés : une donnée ancienne incohérente ne bloque pas la modification d'un autre champ
+    this.assertConsistent(
+      {
+        yearBuilt: dto.yearBuilt !== undefined ? dto.yearBuilt : before.yearBuilt,
+        grossTonnage: dto.grossTonnage !== undefined ? dto.grossTonnage : before.grossTonnage,
+        netTonnage: dto.netTonnage !== undefined ? dto.netTonnage : before.netTonnage,
+      },
+      (path) => (dto as Record<string, unknown>)[path] !== undefined || (path === 'netTonnage' && dto.grossTonnage !== undefined),
+    );
     await this.assertNoDuplicate(dto, id);
     return this.prisma.$transaction(async (tx) => {
       const after = await tx.vessel.update({ where: { id }, data: dto as Prisma.VesselUncheckedUpdateInput });
-      const diff = diffFields(serializeVessel(before) as never, serializeVessel(after) as never);
+      // updatedAt change à chaque écriture : hors du diff (audit FLT-10)
+      const { updatedAt: _b, ...beforeFields } = serializeVessel(before);
+      const { updatedAt: _a, ...afterFields } = serializeVessel(after);
+      const diff = diffFields(beforeFields as never, afterFields as never);
       await this.audit.record(ctx, { action: 'vessel.updated', module: 'fleet', entityType: 'vessel', entityId: id, vesselId: id, ...diff }, tx);
       return serializeVessel(after);
     });
   }
 
-  /** Un navire désactivé/vendu reste dans les données historiques (jamais supprimé). */
+  /**
+   * Un navire désactivé/vendu reste dans les données historiques (jamais supprimé).
+   * Audit FLT-05 : SOLD / INACTIVE refusés tant qu'il reste de l'équipage à bord ou prévu,
+   * ou un voyage planifié / en cours (409 avec la liste).
+   */
   async setStatus(ctx: AuthContext, id: string, status: Vessel['status'], reason?: string) {
     const before = await this.getAccessible(ctx, id);
+    if (status === 'SOLD' || status === 'INACTIVE') {
+      const [crew, voyages] = await Promise.all([
+        this.prisma.crewAssignment.findMany({
+          where: { vesselId: id, status: { in: ['ONBOARD', 'PLANNED'] } },
+          select: { id: true, status: true, rank: true, member: { select: { id: true, firstName: true, lastName: true } } },
+          orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
+          take: 100,
+        }),
+        this.prisma.voyage.findMany({
+          where: { vesselId: id, status: { in: ['PLANNED', 'ACTIVE'] } },
+          select: { id: true, reference: true, status: true },
+          orderBy: { createdAt: 'asc' },
+        }),
+      ]);
+      if (crew.length || voyages.length) {
+        const parts: string[] = [];
+        const onboard = crew.filter((c) => c.status === 'ONBOARD').length;
+        const planned = crew.length - onboard;
+        if (onboard) parts.push(`${onboard} marin(s) à bord`);
+        if (planned) parts.push(`${planned} embarquement(s) prévu(s)`);
+        if (voyages.length) parts.push(`voyage(s) ${voyages.map((v) => v.reference).join(', ')}`);
+        throw Errors.conflict(
+          `Statut « ${status === 'SOLD' ? 'Vendu' : 'Inactif'} » impossible : ${parts.join(', ')}. Débarquez ou annulez ces affectations et clôturez ou annulez ces voyages d'abord.`,
+          {
+            assignments: crew.map((c) => ({ id: c.id, status: c.status, rank: c.rank, memberId: c.member.id, memberName: `${c.member.lastName} ${c.member.firstName}` })),
+            voyages,
+          },
+        );
+      }
+    }
     return this.prisma.$transaction(async (tx) => {
       const after = await tx.vessel.update({ where: { id }, data: { status } });
       await this.audit.record(
@@ -159,7 +208,11 @@ export class VesselsService implements OnModuleInit {
       orderBy: { createdAt: 'desc' },
     });
     const files = await this.prisma.storedFile.findMany({ where: { id: { in: rows.map((r) => r.fileId) } } });
-    return rows.map((r) => ({ ...r, file: toFileDto(files.find((f) => f.id === r.fileId)!) }));
+    // Fichier absent : file null plutôt qu'une erreur 500 (audit FLT-23)
+    return rows.map((r) => {
+      const file = files.find((f) => f.id === r.fileId);
+      return { ...r, file: file ? toFileDto(file) : null };
+    });
   }
 
   async addAttachment(ctx: AuthContext, id: string, dto: AddVesselAttachmentDto) {
@@ -183,6 +236,7 @@ export class VesselsService implements OnModuleInit {
     await this.getAccessible(ctx, vesselId);
     const att = await this.prisma.vesselAttachment.findFirst({ where: { id: attachmentId, vesselId } });
     if (!att) throw Errors.notFound('Pièce jointe');
+    if (att.archivedAt) throw Errors.alreadyProcessed('Pièce jointe déjà archivée');
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.vesselAttachment.update({ where: { id: attachmentId }, data: { archivedAt: new Date() } });
       await this.audit.record(ctx, { action: 'vessel.attachment_archived', module: 'fleet', entityType: 'vessel_attachment', entityId: attachmentId, vesselId }, tx);
@@ -267,6 +321,11 @@ export class VesselsService implements OnModuleInit {
   /** Utilisé par les autres modules : filtre Prisma des navires accessibles. */
   scopeWhere(ctx: AuthContext, field = 'vesselId') {
     return vesselWhere(ctx, field);
+  }
+
+  private assertConsistent(v: Parameters<typeof vesselConsistencyErrors>[0], concerned: (path: string) => boolean = () => true) {
+    const errors = vesselConsistencyErrors(v).filter((e) => concerned(e.path));
+    if (errors.length) throw Errors.validation(errors.map((e) => e.message).join(' ; '), errors);
   }
 
   private async assertNoDuplicate(dto: { imoNumber?: string | null; mmsi?: string | null; code?: string }, excludeId?: string) {

@@ -10,8 +10,12 @@ import {
   checkUtcOffset,
   diffNoonSnapshots,
   flattenSnapshot,
+  localDayKey,
   localTimeLabel,
   missingForSubmission,
+  noonPlausibilityWarnings,
+  reportDateBeforeVoyage,
+  sameReportSlot,
   validateForSubmission,
   validateNoonConsistency,
   validateNoonRanges,
@@ -194,5 +198,45 @@ describe('Snapshot figé et diff de révisions (audit old/new)', () => {
 
   it('aucune différence entre deux snapshots identiques', () => {
     expect(diffNoonSnapshots(buildNoonSnapshot(validReport(), meta(1)), buildNoonSnapshot(validReport(), meta(2)))).toEqual([]);
+  });
+});
+
+describe('Un rapport quotidien par jour local (audit FLT-07)', () => {
+  it('jour local du bord', () => {
+    expect(localDayKey(new Date('2026-10-28T23:30:00Z'), 60)).toBe('2026-10-29');
+    expect(localDayKey(new Date('2026-10-28T11:00:00Z'), 0)).toBe('2026-10-28');
+  });
+
+  it('NOON / MIDNIGHT : même jour local = même créneau ; ARRIVAL : même horodatage', () => {
+    const a = { reportType: 'NOON' as const, reportDateUtc: new Date('2026-10-28T11:00:00Z'), utcOffsetMinutes: 60 };
+    expect(sameReportSlot(a, { ...a, reportDateUtc: new Date('2026-10-28T11:05:00Z') })).toBe(true);
+    expect(sameReportSlot(a, { ...a, reportDateUtc: new Date('2026-10-29T11:00:00Z') })).toBe(false);
+    expect(sameReportSlot(a, { ...a, reportType: 'MIDNIGHT' })).toBe(false);
+    const arr = { reportType: 'ARRIVAL' as const, reportDateUtc: new Date('2026-10-28T11:00:00Z'), utcOffsetMinutes: 0 };
+    expect(sameReportSlot(arr, { ...arr, reportDateUtc: new Date('2026-10-28T15:00:00Z') })).toBe(false);
+    expect(sameReportSlot(arr, { ...arr })).toBe(true);
+  });
+});
+
+describe('Date du rapport et vraisemblance (audit FLT-11)', () => {
+  const voyage = { createdAt: new Date('2026-04-01T00:00:00Z'), etd: new Date('2026-04-20T08:00:00Z'), atd: null, laycanFrom: null };
+  it('refuse un rapport antérieur au voyage', () => {
+    expect(reportDateBeforeVoyage(new Date('2019-02-10T12:00:00Z'), voyage)?.path).toBe('reportDateUtc');
+    expect(reportDateBeforeVoyage(new Date('2026-03-31T12:00:00Z'), voyage)).toBeNull();
+    expect(reportDateBeforeVoyage(new Date('2026-04-22T12:00:00Z'), voyage)).toBeNull();
+  });
+
+  it('distance invraisemblable pour la vitesse : avertissement', () => {
+    const prev = { reportDateUtc: new Date('2026-04-22T12:00:00Z'), foRobMt: '500', doRobMt: '80' };
+    const values: NoonValues = { reportDateUtc: new Date('2026-04-23T12:00:00Z'), speedKnots: '12', distanceSinceLastNm: '5000', foRobMt: '480', doRobMt: '79' };
+    expect(noonPlausibilityWarnings(values, prev).map((w) => w.path)).toEqual(['distanceSinceLastNm']);
+    expect(noonPlausibilityWarnings({ ...values, distanceSinceLastNm: '288' }, prev)).toEqual([]);
+  });
+
+  it('ROB en hausse sans soutage : avertissement', () => {
+    const prev = { reportDateUtc: new Date('2026-04-22T12:00:00Z'), foRobMt: '500', doRobMt: '80' };
+    const w = noonPlausibilityWarnings({ reportDateUtc: new Date('2026-04-23T12:00:00Z'), foRobMt: '900', doRobMt: '79' }, prev);
+    expect(w.map((x) => x.path)).toEqual(['foRobMt']);
+    expect(noonPlausibilityWarnings({ foRobMt: '900' }, null)).toEqual([]);
   });
 });

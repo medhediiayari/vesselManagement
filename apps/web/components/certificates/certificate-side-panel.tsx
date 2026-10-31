@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRight, Gavel, X } from 'lucide-react';
+import { ArrowRight, Folder, Gavel, X } from 'lucide-react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { fmtDate, fmtDateTime } from '@/lib/format';
@@ -12,6 +12,7 @@ import { ErrorState, LoadingBlock } from '@/components/ui/states';
 import { InlineCertificatePreview } from './document-preview';
 import { certKeys, fmtDays, fmtExpiry } from './lib';
 import { ArchivedBadge, DocumentBadge, OpenRequestBadge, RenewalBadge, SubjectLink, ValidityBadge } from './status';
+import { FileCertificateButton } from './tree';
 import { REQUEST_KIND_LABELS, type CertificateDetail } from './types';
 
 /** Panneau de détail à droite de l'explorateur : résumé + aperçu du document officiel. */
@@ -35,7 +36,15 @@ export function CertificateSidePanel({ id, onClose }: { id: string; onClose: () 
         {q.error && <ErrorState error={q.error} onRetry={() => q.refetch()} />}
         {c && (
           <>
-            <SubjectLink subject={c.subject} subjectKind={c.subjectKind} showRank />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <SubjectLink subject={c.subject} subjectKind={c.subjectKind} showRank />
+              {c.permissions.canFile && <FileCertificateButton certificateId={c.id} folder={c.folder} />}
+            </div>
+            {c.folder && (
+              <p className="flex items-center gap-1.5 text-xs text-ink-muted">
+                <Folder className="h-3.5 w-3.5 text-teal-700" aria-hidden /> Dossier : <span className="font-medium text-ink">{c.folder.name}</span>
+              </p>
+            )}
             <div className="flex flex-wrap gap-1.5">
               {c.archivedAt && <ArchivedBadge />}
               <ValidityBadge validity={c.validity} expiryOn={c.currentRevision?.expiryOn} />

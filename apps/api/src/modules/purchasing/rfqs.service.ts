@@ -17,6 +17,7 @@ import {
   max0,
 } from './purchasing.logic';
 import { AddRfqSuppliersDto, CreateRfqDto, ListRfqQuery, MarkRfqSentDto, RfqReasonDto, RfqStatsQuery, UpdateRfqDto } from './rfqs.dto';
+import { escapeLike } from '../../common/utils/like';
 
 /**
  * RFQ (CDC §6.5) : créée à partir de lignes PR (une ou plusieurs PR compatibles d'un même navire),
@@ -36,12 +37,13 @@ export class RfqsService {
     const where: Prisma.RfqWhereInput = {
       AND: [
         vesselWhere(ctx) as Prisma.RfqWhereInput,
+        this.core.rfqOwnWhere(ctx),
         q.vesselId ? { vesselId: q.vesselId } : {},
         q.status?.length ? { status: { in: q.status } } : {},
         q.prId ? { lines: { some: { prLine: { prId: q.prId } } } } : {},
         q.supplierId ? { suppliers: { some: { supplierId: q.supplierId } } } : {},
         q.search
-          ? { OR: [{ number: { contains: q.search, mode: 'insensitive' } }, { title: { contains: q.search, mode: 'insensitive' } }] }
+          ? { OR: [{ number: { contains: escapeLike(q.search), mode: 'insensitive' } }, { title: { contains: escapeLike(q.search), mode: 'insensitive' } }] }
           : {},
         q.from ? { createdAt: { gte: q.from } } : {},
         q.to ? { createdAt: { lt: new Date(q.to.getTime() + 86_400_000) } } : {},
@@ -89,7 +91,7 @@ export class RfqsService {
 
   /** Tuiles de la liste : même périmètre navire que la liste. */
   async stats(ctx: AuthContext, q: RfqStatsQuery) {
-    const where: Prisma.RfqWhereInput = { AND: [vesselWhere(ctx) as Prisma.RfqWhereInput, q.vesselId ? { vesselId: q.vesselId } : {}] };
+    const where: Prisma.RfqWhereInput = { AND: [vesselWhere(ctx) as Prisma.RfqWhereInput, this.core.rfqOwnWhere(ctx), q.vesselId ? { vesselId: q.vesselId } : {}] };
     const [groups, toFollowUp, withPurchaseOrder] = await Promise.all([
       this.prisma.rfq.groupBy({ by: ['status'], where, _count: { _all: true } }),
       this.prisma.rfq.count({ where: { AND: [where, { status: 'ISSUED', deadline: { lt: new Date() } }] } }),
@@ -121,7 +123,7 @@ export class RfqsService {
       ? await this.prisma.quotation.findMany({
           where: { rfqId: id },
           orderBy: { receivedAt: 'asc' },
-          select: { id: true, supplierId: true, reference: true, currency: true, subtotal: true, totalAmount: true, status: true, receivedAt: true, validUntil: true },
+          select: { id: true, supplierId: true, reference: true, currency: true, subtotal: true, totalAmount: true, status: true, receivedAt: true, validUntil: true, freightAmount: true, taxAmount: true, discountAmount: true },
         })
       : undefined;
     const names = await this.core.userNames([rfq.createdById]);
@@ -138,7 +140,13 @@ export class RfqsService {
     };
   }
 
+  /** Date limite de réponse : jamais dans le passé (date seule = fin de journée UTC) — audit ACH-11. */
+  private assertDeadline(deadline: Date | null | undefined) {
+    if (deadline && deadline.getTime() < Date.now()) throw Errors.validation('La date limite de réponse ne peut pas être dans le passé', { field: 'deadline' });
+  }
+
   async create(ctx: AuthContext, dto: CreateRfqDto) {
+    this.assertDeadline(dto.deadline);
     const ids = dto.lines.map((l) => l.prLineId);
     if (new Set(ids).size !== ids.length) throw Errors.validation('Ligne PR citée deux fois');
     const prLines = await this.prisma.prLine.findMany({ where: { id: { in: ids } }, include: { pr: { select: { id: true, number: true, vesselId: true, status: true } } } });
@@ -203,6 +211,8 @@ export class RfqsService {
   async update(ctx: AuthContext, id: string, dto: UpdateRfqDto) {
     const before = await this.core.findRfq(ctx, id);
     if (before.status !== 'DRAFT') throw Errors.invalidState('RFQ émise : modification impossible');
+    // Seule une date limite modifiée est contrôlée (un brouillon ancien reste modifiable sur ses autres champs)
+    if (dto.deadline && dto.deadline.getTime() !== before.deadline?.getTime()) this.assertDeadline(dto.deadline);
     return this.prisma.$transaction(async (tx) => {
       const res = await tx.rfq.updateMany({ where: { id, status: 'DRAFT' }, data: dto as Prisma.RfqUncheckedUpdateManyInput });
       if (!res.count) throw Errors.staleVersion();

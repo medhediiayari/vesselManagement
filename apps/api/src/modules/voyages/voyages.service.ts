@@ -1,16 +1,21 @@
+import { VESSEL_STATUS_LABELS } from '@amc/types';
 import { Injectable } from '@nestjs/common';
 import { Prisma, Voyage } from '@prisma/client';
 import { Errors } from '../../common/errors';
+import { creatorLabels } from '../../common/utils/creators';
 import { cursorArgs, toPage } from '../../common/pagination';
 import { Db, PrismaService } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { AuthContext, can, vesselWhere } from '../access/auth-context';
+import { memberVisibilityWhere } from '../access/member-access';
 import { AuditService, diffFields } from '../audit/audit.service';
 import { NumberingService } from '../documents/numbering.service';
 import { canAccessCp, loadVoyageFiles, serializeVoyage, userLabels } from './voyages.common';
 import { CreateVoyageDto, ListVoyagesQuery, UpdateVoyageDto } from './voyages.dto';
+import { escapeLike } from '../../common/utils/like';
 import {
   CERTIFICATE_CHECK_DISCLAIMER,
+  assignmentCoversVoyage,
   TIMELINE_SCHEDULE_FIELDS,
   TimelineEvent,
   VOYAGE_AUDIT_LABELS,
@@ -23,9 +28,13 @@ import {
   flagCertificate,
   isVoyageClosed,
   pickScheduleDetails,
+  scheduleChangeLabel,
+  validateActualTimesNotFuture,
+  validateVoyageTimes,
   sortTimeline,
   stripCharterPartyReferences,
   voyageEndDate,
+  voyageStartDate,
 } from './voyages.logic';
 
 /**
@@ -72,14 +81,14 @@ export class VoyagesService {
         vesselWhere(ctx) as Prisma.VoyageWhereInput,
         q.vesselId ? { vesselId: q.vesselId } : {},
         q.status ? { status: q.status } : {},
-        q.charterer ? { charterer: { contains: q.charterer, mode: 'insensitive' } } : {},
+        q.charterer ? { charterer: { contains: escapeLike(q.charterer), mode: 'insensitive' } } : {},
         q.search
           ? {
               OR: [
-                { reference: { contains: q.search, mode: 'insensitive' } },
-                { description: { contains: q.search, mode: 'insensitive' } },
-                { charterer: { contains: q.search, mode: 'insensitive' } },
-                { ports: { some: { portName: { contains: q.search, mode: 'insensitive' } } } },
+                { reference: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { description: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { charterer: { contains: escapeLike(q.search), mode: 'insensitive' } },
+                { ports: { some: { portName: { contains: escapeLike(q.search), mode: 'insensitive' } } } },
               ],
             }
           : {},
@@ -122,7 +131,8 @@ export class VoyagesService {
       this.prisma.voyage.count({ where }),
     ]);
     const page = toPage(rows, q, total);
-    return { ...page, items: page.items.map((v) => serializeVoyage(ctx, v)) };
+    const creators = await creatorLabels(this.prisma, page.items.map((v) => v.createdById));
+    return { ...page, items: page.items.map((v) => ({ ...serializeVoyage(ctx, v), createdBy: creators.get(v.createdById) ?? null })) };
   }
 
   /**
@@ -153,9 +163,12 @@ export class VoyagesService {
       loadVoyageFiles(this.prisma, v.id, false),
       this.timeline(ctx, id, v),
     ]);
-    const labels = await userLabels(this.prisma, [
-      ...tasks.flatMap((t) => [t.assigneeId, t.completedById]),
-      ...notices.flatMap((n) => [n.validatedById, n.sentById]),
+    const [labels, creators] = await Promise.all([
+      userLabels(this.prisma, [
+        ...tasks.flatMap((t) => [t.assigneeId, t.completedById]),
+        ...notices.flatMap((n) => [n.validatedById, n.sentById]),
+      ]),
+      creatorLabels(this.prisma, [v.createdById]),
     ]);
     const first = ports[0];
     const last = ports[ports.length - 1];
@@ -163,6 +176,7 @@ export class VoyagesService {
     return {
       overview: {
         ...serializeVoyage(ctx, overview),
+        createdBy: creators.get(v.createdById) ?? null,
         vessel,
         route: ports.length ? `${first.portName} → ${last.portName}` : null,
       },
@@ -277,6 +291,7 @@ export class VoyagesService {
     const vessel = await this.prisma.vessel.findUnique({ where: { id: dto.vesselId } });
     if (!vessel) throw Errors.notFound('Navire');
     if (vessel.status === 'SOLD') throw Errors.business('Navire vendu : création de voyage impossible');
+    this.assertVoyageTimes(dto, dto);
     if (dto.charterPartyId) await this.loadLinkableCp(ctx, dto.charterPartyId, { id: null, vesselId: vessel.id });
 
     const voyage = await this.prisma.$transaction(async (tx) => {
@@ -309,6 +324,15 @@ export class VoyagesService {
     if (laycanFrom && laycanTo && laycanFrom > laycanTo) {
       throw Errors.validation('Laycan : la date de début doit précéder la date de fin');
     }
+    this.assertVoyageTimes(
+      {
+        etd: fields.etd !== undefined ? fields.etd : before.etd,
+        eta: fields.eta !== undefined ? fields.eta : before.eta,
+        atd: fields.atd !== undefined ? fields.atd : before.atd,
+        ata: fields.ata !== undefined ? fields.ata : before.ata,
+      },
+      fields,
+    );
 
     const cpChanged = fields.charterPartyId !== undefined && fields.charterPartyId !== before.charterPartyId;
     if (cpChanged) {
@@ -392,6 +416,11 @@ export class VoyagesService {
       if (cmd === 'plan' || cmd === 'activate') await this.assertCharterPartyRequirement(ctx, { ...v, charterPartyId }, tx);
 
       if (cmd === 'activate') {
+        // Audit FLT-05 : pas d'activation sur un navire vendu, inactif ou désarmé
+        const vessel = await tx.vessel.findUnique({ where: { id: v.vesselId }, select: { status: true } });
+        if (vessel && vessel.status !== 'ACTIVE') {
+          throw Errors.business(`Navire ${(VESSEL_STATUS_LABELS[vessel.status] ?? vessel.status).toLowerCase()} : activation du voyage impossible`);
+        }
         // Un seul voyage ACTIVE par navire (contrôle en transaction SERIALIZABLE)
         const other = await tx.voyage.findFirst({
           where: { vesselId: v.vesselId, status: 'ACTIVE', id: { not: v.id } },
@@ -445,6 +474,19 @@ export class VoyagesService {
       return { voyage: after, warnings: cmd === 'complete' ? metadata : undefined };
     });
     return { ...serializeVoyage(ctx, result.voyage), ...(result.warnings ? { closureWarnings: result.warnings } : {}) };
+  }
+
+  /**
+   * Audit FLT-06 : ordre des dates sur les valeurs fusionnées, dès qu'une date est envoyée ; dates
+   * réelles futures refusées si elles sont envoyées (une donnée ancienne ne bloque pas une autre modification).
+   */
+  private assertVoyageTimes(
+    merged: { etd?: Date | null; eta?: Date | null; atd?: Date | null; ata?: Date | null },
+    sent: { etd?: Date | null; eta?: Date | null; atd?: Date | null; ata?: Date | null },
+  ) {
+    const touched = [sent.etd, sent.eta, sent.atd, sent.ata].some((d) => d !== undefined);
+    const err = (touched ? validateVoyageTimes(merged) : null) ?? validateActualTimesNotFuture({ atd: sent.atd, ata: sent.ata });
+    if (err) throw Errors.validation(err);
   }
 
   /**
@@ -551,10 +593,10 @@ export class VoyagesService {
     if (!hasCreatedAudit) events.push({ at: v.createdAt, kind: 'voyage.created', label: 'Voyage créé', entityType: 'voyage', entityId: v.id });
     for (const a of audits) {
       if (a.action === 'voyage.updated') {
-        const changed = ((a.metadata as { scheduleChanged?: string[] } | null)?.scheduleChanged ?? []).map((f) => f.toUpperCase());
+        const changed = (a.metadata as { scheduleChanged?: string[] } | null)?.scheduleChanged ?? [];
         if (!changed.length) continue; // la timeline ne reprend que les changements de planning
         // Détail limité aux champs de planning (jamais le rattachement CP ou d'autres champs modifiés)
-        events.push({ at: a.occurredAt, kind: 'voyage.schedule_updated', label: `Planning mis à jour (${changed.join(', ')})`, actor: a.actorLabel, entityType: 'voyage', entityId: `${v.id}:${a.id}`, details: pickScheduleDetails(a.after) });
+        events.push({ at: a.occurredAt, kind: 'voyage.schedule_updated', label: scheduleChangeLabel(changed), actor: a.actorLabel, entityType: 'voyage', entityId: `${v.id}:${a.id}`, details: pickScheduleDetails(a.after) });
         continue;
       }
       const label = VOYAGE_AUDIT_LABELS[a.action];
@@ -628,6 +670,7 @@ export class VoyagesService {
     const items = certs
       .map((c) => ({ ...c, flag: flagCertificate({ expiryKind: c.currentExpiryKind, expiryOn: c.currentExpiryOn }, end, today) }))
       .filter((c) => c.flag !== null);
+    const crew = await this.crewCertificateCheck(ctx, v, voyageStartDate(v, ports), end, today);
     return {
       available: true,
       informativeOnly: true,
@@ -641,6 +684,77 @@ export class VoyagesService {
         expiryUnknown: items.filter((i) => i.flag === 'EXPIRY_UNKNOWN').length,
       },
       items,
+      crew,
+    };
+  }
+
+  /**
+   * Volet équipage du contrôle : certificats des marins à bord pendant le voyage (affectations du navire qui recoupent
+   * la période). Fiches hors périmètre exclues (ADM-070). Jamais d'indication « justificatif manquant » : le PDF des
+   * certificats de marins est facultatif.
+   */
+  private async crewCertificateCheck(ctx: AuthContext, v: Voyage, start: Date | null, end: Date | null, today: Date) {
+    if (!can(ctx, 'members.view')) {
+      return { available: false as const, reason: 'Permission members.view requise pour contrôler les certificats de l’équipage' };
+    }
+    const assignments = await this.prisma.crewAssignment.findMany({
+      where: {
+        vesselId: v.vesselId,
+        status: { in: ['PLANNED', 'ONBOARD', 'COMPLETED'] },
+        member: memberVisibilityWhere(ctx),
+      },
+      select: {
+        memberId: true,
+        rank: true,
+        status: true,
+        plannedJoinDate: true,
+        actualJoinDate: true,
+        plannedSignOffDate: true,
+        actualSignOffDate: true,
+        member: { select: { firstName: true, lastName: true } },
+      },
+      orderBy: [{ actualJoinDate: 'desc' }, { plannedJoinDate: 'desc' }],
+    });
+    const aboard = new Map<string, (typeof assignments)[number]>();
+    for (const a of assignments) if (assignmentCoversVoyage(a, start, end) && !aboard.has(a.memberId)) aboard.set(a.memberId, a);
+    const certs = aboard.size
+      ? await this.prisma.certificate.findMany({
+          where: { memberId: { in: [...aboard.keys()] }, subjectKind: 'MEMBER', archivedAt: null, currentRevisionId: { not: null } },
+          select: {
+            id: true,
+            memberId: true,
+            currentNumber: true,
+            currentExpiryKind: true,
+            currentExpiryOn: true,
+            type: { select: { code: true, name: true, category: true } },
+          },
+          orderBy: { currentExpiryOn: 'asc' },
+        })
+      : [];
+    const flagged = certs
+      .map(({ memberId, ...c }) => ({ memberId, cert: { ...c, flag: flagCertificate({ expiryKind: c.currentExpiryKind, expiryOn: c.currentExpiryOn }, end, today) } }))
+      .filter((x) => x.cert.flag !== null);
+    const members = [...aboard.values()]
+      .map((a) => ({
+        memberId: a.memberId,
+        name: `${a.member.lastName} ${a.member.firstName}`.trim(),
+        rank: a.rank,
+        assignmentStatus: a.status,
+        items: flagged.filter((x) => x.memberId === a.memberId).map((x) => x.cert),
+      }))
+      .filter((m) => m.items.length)
+      .sort((x, y) => x.name.localeCompare(y.name, 'fr'));
+    const all = members.flatMap((m) => m.items);
+    return {
+      available: true as const,
+      voyageStart: start,
+      checkedMembers: aboard.size,
+      counts: {
+        expired: all.filter((i) => i.flag === 'EXPIRED').length,
+        expiringBeforeVoyageEnd: all.filter((i) => i.flag === 'EXPIRES_BEFORE_VOYAGE_END').length,
+        expiryUnknown: all.filter((i) => i.flag === 'EXPIRY_UNKNOWN').length,
+      },
+      members,
     };
   }
 }

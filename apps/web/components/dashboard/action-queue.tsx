@@ -13,6 +13,14 @@ export const PRIORITY: Record<Priority, { label: string; rule: string; tag: stri
   follow: { label: 'Suivi', rule: 'bg-action', tag: 'border-action-100 bg-action-50 text-action-700', rank: 2 },
 };
 
+/** Droits de pure consultation (lecture, aperçu, téléchargement, export). */
+const READ_ONLY_PERMISSION = /(^|\.)(view|view_all|preview|export|download\w*)(\.|$)/;
+
+/** Profil sans aucun droit d'écriture (ex. Direction) : la file devient des « points de vigilance » (UI-06). */
+export function isReadOnlyProfile(permissions: string[]): boolean {
+  return permissions.every((p) => READ_ONLY_PERMISSION.test(p));
+}
+
 export interface ActionItem {
   key: string;
   priority: Priority;
@@ -43,13 +51,13 @@ export function buildActions(d: DashboardData, vq: string): ActionItem[] {
     push({ key: 'po-late', priority: 'action', count: p.lateOrders, label: 'Bons de commande en retard', detail: 'Livraison attendue dépassée', href: '/purchasing/orders?late=true' });
     push({ key: 'variances', priority: 'action', count: p.openVariances, label: 'Écarts de réception ouverts', detail: 'Manquants, rejets ou surplus à régler', href: '/purchasing/deliveries' });
   }
-  push(a.certificates !== undefined && { key: 'ap-cert', priority: 'action', count: a.certificates, label: 'Demandes de certificats à valider', detail: 'Nouvelle révision en attente — l’ancienne reste courante', href: '/certificates?pendingApproval=true' });
+  push(a.certificates !== undefined && { key: 'ap-cert', priority: 'action', count: a.certificates, label: 'Demandes de certificats à valider', detail: 'Nouvelle révision en attente — l’ancienne reste courante', href: `/certificates?pendingApproval=true${vq}` });
   push(a.csoDocuments !== undefined && { key: 'ap-cso', priority: 'action', count: a.csoDocuments, label: 'Documents CSO à approuver', detail: 'Versions proposées dans vos dossiers', href: '/cso?pending=true' });
   push(a.purchaseRequests !== undefined && { key: 'ap-pr', priority: 'action', count: a.purchaseRequests, label: 'Purchase Requests à revoir', detail: 'Soumises par le bord ou les services', href: '/purchasing/requests?status=SUBMITTED' });
   push(a.purchaseOrders !== undefined && { key: 'ap-po', priority: 'action', count: a.purchaseOrders, label: 'Bons de commande à approuver', detail: 'Selon les seuils d’approbation configurés', href: '/purchasing/orders?status=APPROVAL_PENDING' });
   push(a.charterParties !== undefined && { key: 'ap-cp', priority: 'action', count: a.charterParties, label: 'Versions de Charter Party à valider', detail: 'Révision contractuelle en attente', href: '/charter-parties?pending=true' });
   push({ key: 'my-returned', priority: 'action', count: d.myTasks.returnedCertificateRequests, label: 'Vos demandes retournées pour correction', detail: 'Certificats à corriger puis resoumettre', href: '/certificates?mine=returned' });
-  push({ key: 'my-renewals', priority: 'follow', count: d.myTasks.certificateRenewals, label: 'Renouvellements qui vous sont assignés', detail: 'Suivi interne du renouvellement', href: '/certificates?mine=renewal' });
+  push({ key: 'my-renewals', priority: 'follow', count: d.myTasks.certificateRenewals, label: 'Renouvellements qui vous sont assignés', detail: 'Suivi interne du renouvellement', href: `/certificates?mine=renewal${vq}` });
   push({ key: 'my-voyage', priority: 'follow', count: d.myTasks.voyageTasks, label: 'Tâches de voyage ouvertes', detail: 'Checklists et instructions à accuser', href: '/voyages' });
   return items;
 }
@@ -81,14 +89,14 @@ export function sortActions(items: ActionItem[]) {
   return items.sort((x, y) => PRIORITY[x.priority].rank - PRIORITY[y.priority].rank || y.count - x.count);
 }
 
-export function ActionQueue({ items }: { items: ActionItem[] }) {
+export function ActionQueue({ items, readOnly = false }: { items: ActionItem[]; readOnly?: boolean }) {
   const open = items.filter((i) => i.count > 0);
   const clear = items.filter((i) => i.count === 0);
   return (
     <div>
       {open.length === 0 ? (
         <p className="flex items-center gap-2 px-4 py-6 text-sm text-ok">
-          <CheckCircle2 className="h-5 w-5" aria-hidden /> Aucune action en attente dans votre périmètre.
+          <CheckCircle2 className="h-5 w-5" aria-hidden /> {readOnly ? 'Aucun point de vigilance dans votre périmètre.' : 'Aucune action en attente dans votre périmètre.'}
         </p>
       ) : (
         // Deux colonnes sur grand écran : la file reste lisible sans allonger la page
@@ -103,7 +111,7 @@ export function ActionQueue({ items }: { items: ActionItem[] }) {
                   <span className="min-w-0 flex-1">
                     <span className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-navy">{it.label}</span>
-                      <span className={cn('rounded border px-1.5 text-2xs font-semibold leading-4', pr.tag)}>{pr.label}</span>
+                      <span className={cn('rounded border px-1.5 text-2xs font-semibold leading-4', pr.tag)}>{readOnly && it.priority === 'action' ? 'À surveiller' : pr.label}</span>
                     </span>
                     <span className="block text-xs text-ink-muted sm:truncate">{it.detail}</span>
                   </span>

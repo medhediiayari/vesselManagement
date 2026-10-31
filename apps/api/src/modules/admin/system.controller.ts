@@ -6,7 +6,7 @@ import { Errors } from '../../common/errors';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { AuthContext } from '../access/auth-context';
 import { AuditService } from '../audit/audit.service';
-import { SchedulerBootstrap } from '../jobs/scheduler.service';
+import { SchedulerBootstrap, SchedulerRegistry } from '../jobs/scheduler.service';
 import { SCHEDULED_JOBS } from '../jobs/queues';
 import { StorageService } from '../files/storage.service';
 
@@ -21,6 +21,7 @@ export class SystemController {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly scheduler: SchedulerBootstrap,
+    private readonly registry: SchedulerRegistry,
     private readonly audit: AuditService,
   ) {}
 
@@ -82,7 +83,8 @@ export class SystemController {
   @Post('jobs/:name/run')
   @RequirePermissions('settings.manage')
   async run(@Auth() ctx: AuthContext, @Param('name') name: string) {
-    if (!(Object.values(SCHEDULED_JOBS) as string[]).includes(name) || name === SCHEDULED_JOBS.ORPHAN_FILES_CLEANUP) {
+    // Sans traitement enregistré, « queued » serait un faux succès (ADM-24)
+    if (!(Object.values(SCHEDULED_JOBS) as string[]).includes(name) || name === SCHEDULED_JOBS.ORPHAN_FILES_CLEANUP || !this.registry.get(name)) {
       throw Errors.validation('Tâche inconnue ou non déclenchable');
     }
     const job = await this.scheduler.runNow(name);

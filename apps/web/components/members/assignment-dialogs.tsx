@@ -1,9 +1,11 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Anchor, CalendarPlus, LogOut, Search } from 'lucide-react';
+import { AlertTriangle, Anchor, CalendarPlus, ExternalLink, LogOut, Search } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useId, useState } from 'react';
 import { toast } from 'sonner';
+import { createdBySentence, type CreatorLabel } from '@/components/amc/created-by';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
 import { Checkbox, Field, Input, Select, Textarea } from '@/components/ui/field';
@@ -12,7 +14,15 @@ import { cn, fmtDate } from '@/lib/format';
 import { useSession } from '@/lib/session';
 import { MemberAvatar, MemberStatusBadge } from './member-ui';
 import { useDebounced } from './use-debounced';
-import { memberName, todayYmd, type CrewAssignmentDto, type MemberListItem, type Roster } from './types';
+import {
+  memberName,
+  todayYmd,
+  type CrewAssignmentDto,
+  type CrewCertificateCheck,
+  type CrewCertificateCheckItem,
+  type MemberListItem,
+  type Roster,
+} from './types';
 
 /** Requêtes à rafraîchir après toute transition d'affectation (fiche, roster, listes). */
 export const CREW_QUERY_KEYS = [['member'], ['members'], ['vessel-roster'], ['member-self']];
@@ -31,6 +41,135 @@ function tomorrowYmd() {
 /** Erreurs de validation API -> message par champ. */
 function apiFieldErrors(e: unknown): Record<string, string> {
   return e instanceof ApiError ? e.fieldErrors : {};
+}
+
+/** Avertissements à afficher en toast : ceux des certificats ne sont pas doublés s'ils étaient déjà affichés avant confirmation. */
+function toastWarnings(res: { warnings?: string[]; certificateWarnings?: string[] }, certificatesShown: boolean) {
+  const shown = new Set(certificatesShown ? (res.certificateWarnings ?? []) : []);
+  res.warnings?.filter((w) => !shown.has(w)).forEach((w) => toast.warning(w, { duration: 10_000 }));
+}
+
+// ---------------------------------------------------------------------------
+// Contrôle des certificats du marin sur la période (avertissement non bloquant)
+// ---------------------------------------------------------------------------
+
+interface CertificateCheckParams {
+  memberId?: string | null;
+  vesselId?: string | null;
+  plannedJoinDate?: string | null;
+  plannedSignOffDate?: string | null;
+  voyageId?: string | null;
+}
+
+/** Prévisualisation serveur ; aucun appel sans droit de lecture des certificats de marins. */
+function useCertificateCheck(params: CertificateCheckParams, enabled: boolean) {
+  const { can } = useSession();
+  const allowed = can('certificates.view') && can('members.certificates.view');
+  // Saisie de date au clavier : n'interroger qu'une fois la valeur stabilisée (clé texte : identité stable)
+  const key = JSON.stringify([params.memberId ?? null, params.vesselId ?? null, params.plannedJoinDate || null, params.plannedSignOffDate || null, params.voyageId || null]);
+  const debouncedKey = useDebounced(key, 400);
+  const [memberId, vesselId, plannedJoinDate, plannedSignOffDate, voyageId] = JSON.parse(debouncedKey) as (string | null)[];
+  const p = { memberId, vesselId, plannedJoinDate, plannedSignOffDate, voyageId };
+  const datesOrdered = !p.plannedJoinDate || !p.plannedSignOffDate || p.plannedSignOffDate >= p.plannedJoinDate;
+  const query = useQuery({
+    queryKey: ['crew-certificate-check', p.memberId, p.vesselId, p.plannedJoinDate, p.plannedSignOffDate, p.voyageId],
+    queryFn: () =>
+      api.get<CrewCertificateCheck>('/crew-assignments/certificate-check', {
+        query: {
+          memberId: p.memberId ?? undefined,
+          vesselId: p.vesselId ?? undefined,
+          plannedJoinDate: p.plannedJoinDate || undefined,
+          plannedSignOffDate: p.plannedSignOffDate || undefined,
+          voyageId: p.voyageId || undefined,
+        },
+      }),
+    enabled: enabled && allowed && !!p.memberId && !!p.vesselId && datesOrdered,
+    staleTime: 30_000,
+  });
+  const active = enabled && allowed && !!params.memberId && !!params.vesselId;
+  // Saisie en cours (clé non stabilisée) : ne pas montrer le résultat d'un autre marin / d'autres dates
+  return { query, active, settled: debouncedKey === key };
+}
+
+function certificateLine(i: CrewCertificateCheckItem, end: string | null, signOffDate: string | null | undefined): string {
+  if (i.flag === 'EXPIRED') return `${i.typeName} — expiré depuis le ${fmtDate(i.expiryOn)}`;
+  const limit = end && signOffDate && end === signOffDate ? `avant le débarquement prévu du ${fmtDate(end)}` : `avant la fin prévue de la période (${fmtDate(end)})`;
+  return `${i.typeName} — expire le ${fmtDate(i.expiryOn)}, ${limit}`;
+}
+
+/**
+ * Encadré affiché au-dessus des boutons : certificats expirés ou expirant avant la fin de la période.
+ * Jamais de mention « justificatif / document manquant » (PDF facultatif pour les marins).
+ */
+function CertificateCheckNotice({
+  check: checkState,
+  memberId,
+  memberLabel,
+  signOffDate,
+}: {
+  check: ReturnType<typeof useCertificateCheck>;
+  memberId: string | null | undefined;
+  memberLabel: string;
+  signOffDate?: string | null;
+}) {
+  const { can } = useSession();
+  const { query, active, settled } = checkState;
+  if (!active) return null;
+  if (!settled || query.isLoading) {
+    return (
+      <p className="mt-3 text-xs text-ink-muted" role="status">
+        Contrôle des certificats du marin…
+      </p>
+    );
+  }
+  if (query.error) return <p className="mt-3 text-xs text-ink-muted">Contrôle des certificats indisponible : {errorMessage(query.error)}</p>;
+  const check = query.data;
+  if (!check?.available) return null;
+  const problems = check.items.filter((i) => i.flag !== 'EXPIRY_UNKNOWN');
+  const unknown = check.counts.expiryUnknown;
+  const link =
+    memberId && can('members.certificates.view') ? (
+      <Link
+        href={`/members/${memberId}?tab=certificates`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 font-medium text-action hover:underline"
+      >
+        Voir les certificats <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+      </Link>
+    ) : null;
+  const unknownText = unknown ? `${unknown} certificat${unknown > 1 ? 's' : ''} sans date d’échéance` : null;
+  const noEndHint = !check.end ? 'Sans date de débarquement prévue, seuls les certificats déjà expirés sont signalés.' : null;
+
+  if (!problems.length) {
+    if (!unknownText && !noEndHint) return null;
+    return (
+      <p className="mt-3 flex flex-wrap items-center gap-x-2 text-xs text-ink-muted">
+        {[unknownText, noEndHint].filter(Boolean).join(' · ')}
+        {unknownText && link}
+      </p>
+    );
+  }
+  const n = problems.length;
+  return (
+    <div className="mt-3 rounded-md border border-warn-line bg-warn-bg px-3 py-2 text-sm" role="status" aria-live="polite">
+      <p className="flex items-start gap-2 font-medium text-warn">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+        {n} certificat{n > 1 ? 's' : ''} de {memberLabel} {n > 1 ? 'posent' : 'pose'} problème sur cette période
+      </p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-10 text-ink">
+        {problems.map((i) => (
+          <li key={i.certificateId}>{certificateLine(i, check.end, signOffDate)}</li>
+        ))}
+      </ul>
+      <p className="mt-1.5 flex flex-wrap items-center gap-x-3 pl-6 text-xs text-ink-muted">
+        <span>Avertissement non bloquant : vous pouvez confirmer quand même.</span>
+        {unknownText && <span>{unknownText}</span>}
+        {noEndHint && <span>{noEndHint}</span>}
+        {link}
+      </p>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +298,10 @@ export function PlanAssignmentDialog({
   });
   const reliefOptions = [...(roster.data?.onboard ?? []), ...(roster.data?.planned ?? [])].filter((a) => a.memberId !== picked?.id);
   const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const certCheck = useCertificateCheck(
+    { memberId: picked?.id, vesselId, plannedJoinDate: form.plannedJoinDate, plannedSignOffDate: form.plannedSignOffDate },
+    open,
+  );
 
   const submit = async () => {
     const local: Record<string, string> = {};
@@ -184,7 +327,8 @@ export function PlanAssignmentDialog({
         relievesAssignmentId: form.relievesAssignmentId || null,
       });
       toast.success(`Embarquement planifié sur ${res.vessel.name}`);
-      res.warnings?.forEach((w) => toast.warning(w, { duration: 10_000 }));
+      // Alertes certificats déjà affichées dans l'encadré avant confirmation : pas de doublon en toast
+      toastWarnings(res, certCheck.settled && certCheck.query.data?.available === true);
       await invalidate();
       onOpenChange(false);
     } catch (e) {
@@ -284,6 +428,7 @@ export function PlanAssignmentDialog({
           <Textarea id="plan-notes" rows={2} value={form.notes} onChange={(e) => set('notes', e.target.value)} maxLength={5000} />
         </Field>
       </div>
+      <CertificateCheckNotice check={certCheck} memberId={picked?.id} memberLabel={picked?.name ?? 'ce marin'} signOffDate={form.plannedSignOffDate || null} />
     </Dialog>
   );
 }
@@ -303,6 +448,13 @@ export interface AssignmentRef {
   relievesAssignmentId: string | null;
   relievesName?: string | null;
   actualJoinDate?: string | null;
+  /** Contrôle des certificats à l'embarquement */
+  memberId?: string;
+  vesselId?: string;
+  voyageId?: string | null;
+  /** Auteur de la planification : rappelé avant d'annuler le travail d'un autre */
+  createdBy?: CreatorLabel | null;
+  createdAt?: string | null;
 }
 
 export function JoinAssignmentDialog({ assignment, onOpenChange }: { assignment: AssignmentRef | null; onOpenChange: (o: boolean) => void }) {
@@ -320,6 +472,11 @@ export function JoinAssignmentDialog({ assignment, onOpenChange }: { assignment:
     setSignOffRelieved(true);
   }, [assignment]);
 
+  const certCheck = useCertificateCheck(
+    { memberId: assignment?.memberId, vesselId: assignment?.vesselId, plannedSignOffDate: assignment?.plannedSignOffDate, voyageId: assignment?.voyageId },
+    !!assignment,
+  );
+
   const submit = async () => {
     if (!assignment) return;
     setBusy(true);
@@ -332,6 +489,7 @@ export function JoinAssignmentDialog({ assignment, onOpenChange }: { assignment:
       toast.success(
         `${assignment.memberName} embarqué(e) sur ${assignment.vesselName}${res.relievedAssignmentIds?.length ? ' — relève débarquée à la même date' : ''}`,
       );
+      toastWarnings(res, certCheck.settled && certCheck.query.data?.available === true);
       await invalidate();
       onOpenChange(false);
     } catch (e) {
@@ -376,6 +534,12 @@ export function JoinAssignmentDialog({ assignment, onOpenChange }: { assignment:
         )}
         {assignment?.plannedJoinDate && <p className="text-xs text-ink-muted">Embarquement prévu le {fmtDate(assignment.plannedJoinDate)}.</p>}
       </div>
+      <CertificateCheckNotice
+        check={certCheck}
+        memberId={assignment?.memberId}
+        memberLabel={assignment?.memberName ?? 'ce marin'}
+        signOffDate={assignment?.plannedSignOffDate}
+      />
     </Dialog>
   );
 }
@@ -468,7 +632,16 @@ export function CancelAssignmentDialog({ assignment, onOpenChange }: { assignmen
       open={!!assignment}
       onOpenChange={onOpenChange}
       title="Annuler l'affectation planifiée"
-      description={assignment ? `${assignment.memberName} — ${assignment.rank} — ${assignment.vesselName}` : undefined}
+      description={
+        assignment ? (
+          <>
+            {assignment.memberName} — {assignment.rank} — {assignment.vesselName}
+            {assignment.createdAt !== undefined && (
+              <span className="mt-1 block text-ink">Cette affectation a été {createdBySentence(assignment.createdBy, assignment.createdAt, 'planifiée')}.</span>
+            )}
+          </>
+        ) : undefined
+      }
       confirmLabel="Annuler l'affectation"
       tone="danger"
       requireReason

@@ -2,6 +2,7 @@
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, Lock, LogOut, RotateCcw, ShieldCheck, Trash2, Unlock } from 'lucide-react';
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -19,6 +20,7 @@ import { DefinitionGrid, PageHeader, Panel } from '@/components/ui/page';
 import { ErrorState, LoadingBlock } from '@/components/ui/states';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { MODULE_LABELS, type DepartmentDto, type PermissionDto, type RoleDto, type UserDetail } from '../../types';
+import { roleGrantBlock } from '../role-grant';
 import { TemporaryPasswordNotice, UserStatusBadges } from '../user-widgets';
 
 interface SessionRow {
@@ -33,6 +35,19 @@ interface SessionRow {
   revokedReason: string | null;
 }
 
+/** Motifs de fermeture de session (codes API → libellés, ADM-26). */
+const SESSION_CLOSE_REASONS: Record<string, string> = {
+  LOGOUT: 'Déconnexion',
+  IDLE_TIMEOUT: 'Inactivité',
+  USER_REVOKED: 'Fermée par l’utilisateur',
+  ADMIN_REVOKED: 'Révoquée par un administrateur',
+  PASSWORD_CHANGED: 'Mot de passe changé',
+  PASSWORD_RESET: 'Mot de passe réinitialisé par lien',
+  PASSWORD_RESET_BY_ADMIN: 'Réinitialisé par un administrateur',
+  ACCOUNT_LOCKED: 'Compte verrouillé',
+  ACCOUNT_DEACTIVATED: 'Compte désactivé',
+};
+
 export default function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { can, me } = useSession();
@@ -41,10 +56,13 @@ export default function UserDetailPage() {
   const roles = useQuery({ queryKey: ['roles'], queryFn: () => api.get<RoleDto[]>('/roles'), enabled: can('roles.view') || can('users.edit') });
   const perms = useQuery({ queryKey: ['permissions'], queryFn: () => api.get<PermissionDto[]>('/permissions') });
   const depts = useQuery({ queryKey: ['departments'], queryFn: () => api.get<DepartmentDto[]>('/departments') });
+  const [tab, setTab] = useState('access');
   const sessions = useQuery({
     queryKey: ['user-sessions', id],
     queryFn: () => api.get<SessionRow[]>(`/users/${id}/sessions`),
-    enabled: can('sessions.view'),
+    // Chargées à l'ouverture de l'onglet : sur un compte non gérable l'API répond 403, tracé « accès refusé »
+    enabled: can('sessions.view') && tab === 'sessions',
+    retry: false,
   });
 
   const [temp, setTemp] = useState<string | null>(null);
@@ -121,11 +139,21 @@ export default function UserDetailPage() {
                 </Button>
               </PermissionGate>
             )}
-            <PermissionGate allOf={['users.reset_password']}>
-              <Button variant="secondary" onClick={() => setConfirm('reset')}>
-                <RotateCcw className="h-4 w-4" aria-hidden /> Mot de passe temporaire
-              </Button>
-            </PermissionGate>
+            {/* Sur son propre compte, ces actions fermeraient la session en cours sans prévenir (ADM-15) */}
+            {isSelf ? (
+              <Link
+                href="/change-password"
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-line-strong bg-white px-4 text-base font-medium text-ink hover:bg-surface-sunken"
+              >
+                <RotateCcw className="h-4 w-4" aria-hidden /> Changer mon mot de passe
+              </Link>
+            ) : (
+              <PermissionGate allOf={['users.reset_password']}>
+                <Button variant="secondary" onClick={() => setConfirm('reset')}>
+                  <RotateCcw className="h-4 w-4" aria-hidden /> Mot de passe temporaire
+                </Button>
+              </PermissionGate>
+            )}
             {!isSelf && (
               <PermissionGate allOf={['users.deactivate']}>
                 {u.status === 'ACTIVE' ? (
@@ -146,7 +174,7 @@ export default function UserDetailPage() {
         </div>
       )}
 
-      <Tabs defaultValue="access">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="mb-4">
           <TabsTrigger value="access">Rôles & droits</TabsTrigger>
           <TabsTrigger value="scope">Navires & départements</TabsTrigger>
@@ -165,16 +193,21 @@ export default function UserDetailPage() {
             }
           >
             <div className="space-y-2">
-              {roles.data?.map((r) => (
-                <Checkbox
-                  key={r.id}
-                  label={r.name}
-                  description={r.description ?? undefined}
-                  checked={roleSel.includes(r.id)}
-                  disabled={!can('users.edit')}
-                  onChange={(e) => setRoleSel(e.target.checked ? [...roleSel, r.id] : roleSel.filter((x) => x !== r.id))}
-                />
-              ))}
+              {roles.data?.map((r) => {
+                // Rôle hors délégation : ni attribuable ni retirable (ADM-16)
+                const block = can('users.edit') ? roleGrantBlock(r, me) : null;
+                return (
+                  <Checkbox
+                    key={r.id}
+                    label={r.name}
+                    description={block ? <span className="text-warn">{block}</span> : r.description ?? undefined}
+                    title={block ?? undefined}
+                    checked={roleSel.includes(r.id)}
+                    disabled={!can('users.edit') || !!block}
+                    onChange={(e) => setRoleSel(e.target.checked ? [...roleSel, r.id] : roleSel.filter((x) => x !== r.id))}
+                  />
+                );
+              })}
             </div>
           </Panel>
           <Panel
@@ -363,10 +396,29 @@ export default function UserDetailPage() {
                 <Input id="p-job" value={profile.jobTitle} onChange={(e) => setProfile({ ...profile, jobTitle: e.target.value })} disabled={!can('users.edit')} />
               </Field>
               <Field label="E-mail" htmlFor="p-email">
-                <Input id="p-email" type="email" value={profile.email} onChange={(e) => setProfile({ ...profile, email: e.target.value })} disabled={!can('users.edit')} />
+                <Input
+                  id="p-email"
+                  type="email"
+                  value={profile.email}
+                  // Nouvelle adresse = non vérifiée (ADM-13) : l'API l'impose aussi
+                  onChange={(e) =>
+                    setProfile({
+                      ...profile,
+                      email: e.target.value,
+                      emailVerified: sameEmail(e.target.value, u.email) ? !!u.emailVerifiedAt : false,
+                    })
+                  }
+                  disabled={!can('users.edit')}
+                />
               </Field>
               <div className="pt-6">
-                <Checkbox label="E-mail vérifié" checked={profile.emailVerified} onChange={(e) => setProfile({ ...profile, emailVerified: e.target.checked })} disabled={!can('users.edit')} />
+                <Checkbox
+                  label="E-mail vérifié"
+                  description={!sameEmail(profile.email, u.email) ? 'Enregistrez d’abord la nouvelle adresse, puis confirmez sa vérification.' : undefined}
+                  checked={profile.emailVerified}
+                  onChange={(e) => setProfile({ ...profile, emailVerified: e.target.checked })}
+                  disabled={!can('users.edit') || !sameEmail(profile.email, u.email)}
+                />
               </div>
             </div>
             <div className="mt-5 border-t border-line pt-4">
@@ -388,11 +440,17 @@ export default function UserDetailPage() {
             <Panel
               title="Sessions"
               actions={
-                <PermissionGate allOf={['sessions.revoke']}>
-                  <Button size="sm" variant="secondary" onClick={() => setConfirm('revokeAll')}>
-                    <LogOut className="h-4 w-4" aria-hidden /> Révoquer toutes
-                  </Button>
-                </PermissionGate>
+                isSelf ? (
+                  <Link href="/account" className="text-sm font-medium text-action hover:underline">
+                    Gérer mes sessions depuis Mon compte
+                  </Link>
+                ) : (
+                  <PermissionGate allOf={['sessions.revoke']}>
+                    <Button size="sm" variant="secondary" onClick={() => setConfirm('revokeAll')}>
+                      <LogOut className="h-4 w-4" aria-hidden /> Révoquer toutes
+                    </Button>
+                  </PermissionGate>
+                )
               }
               bodyClassName="p-0"
             >
@@ -401,15 +459,18 @@ export default function UserDetailPage() {
                   <tr><th>Appareil</th><th>Adresse IP</th><th>Ouverte</th><th>Dernière activité</th><th>État</th><th /></tr>
                 </thead>
                 <tbody>
+                  {sessions.isError && (
+                    <tr><td colSpan={6} className="text-ink-muted">Sessions non consultables : ce compte est hors de votre périmètre d’administration.</td></tr>
+                  )}
                   {sessions.data?.map((s) => (
                     <tr key={s.id}>
                       <td>{s.deviceLabel ?? '—'}</td>
                       <td className="tabular">{s.ip ?? '—'}</td>
                       <td className="tabular">{fmtDateTime(s.createdAt)}</td>
                       <td className="tabular">{fmtDateTime(s.lastSeenAt)}</td>
-                      <td>{s.revokedAt ? <Badge tone="neutral">Fermée ({s.revokedReason})</Badge> : new Date(s.expiresAt) < new Date() ? <Badge tone="neutral">Expirée</Badge> : <Badge tone="ok">Active</Badge>}</td>
+                      <td>{s.revokedAt ? <Badge tone="neutral">Fermée{s.revokedReason ? ` — ${SESSION_CLOSE_REASONS[s.revokedReason] ?? s.revokedReason}` : ''}</Badge> : new Date(s.expiresAt) < new Date() ? <Badge tone="neutral">Expirée</Badge> : <Badge tone="ok">Active</Badge>}</td>
                       <td className="text-right">
-                        {!s.revokedAt && can('sessions.revoke') && (
+                        {!s.revokedAt && can('sessions.revoke') && !isSelf && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -437,7 +498,8 @@ export default function UserDetailPage() {
         {can('audit.view.admin') && (
           <TabsContent value="history">
             <Panel title="Historique du compte">
-              <AuditTimeline entityType="user" entityId={u.id} module="admin" />
+              {/* Sans filtre de module : verrouillage et échecs de connexion (module auth) visibles (ADM-25) */}
+              <AuditTimeline entityType="user" entityId={u.id} />
             </Panel>
           </TabsContent>
         )}
@@ -503,4 +565,9 @@ export default function UserDetailPage() {
       />
     </>
   );
+}
+
+/** Comparaison alignée sur l'API (adresse normalisée en minuscules). */
+function sameEmail(input: string, saved: string | null): boolean {
+  return input.trim().toLowerCase() === (saved ?? '');
 }

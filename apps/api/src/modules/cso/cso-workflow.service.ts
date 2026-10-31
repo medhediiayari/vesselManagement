@@ -9,7 +9,7 @@ import { NumberingService } from '../documents/numbering.service';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CsoAccessService, OWNER_CSO_VERSION } from './cso-access.service';
-import { normalizeReference, referenceSequenceKey, renderReference, restorationSource } from './cso-rules';
+import { RestoreMode, normalizeReference, referenceSequenceKey, renderReference, restorePlan } from './cso-rules';
 
 /**
  * Cycle de vie documentaire partagé (création de version, références, notifications) :
@@ -188,23 +188,21 @@ export class CsoWorkflowService {
   }
 
   /**
-   * Dernier blob APPROUVÉ (publié ou remplacé) d'un document — seule base admissible d'une restauration.
-   * Jamais de repli sur une version non approuvée (brouillon, rejetée, annulée…) : sinon une restauration
-   * pourrait faire valider un contenu qui n'a jamais été approuvé (audit sécurité #10).
+   * Mode de restauration par document (CSO-03) : APPROVAL (déjà approuvé) ou DRAFT (archivé pendant sa
+   * première approbation). Un document absent de la carte n'a aucune version : non restaurable.
    */
-  async lastOfficialVersion(documentId: string, db: Db): Promise<CsoVersion | null> {
-    return restorationSource(await db.csoVersion.findMany({ where: { documentId } }));
-  }
-
-  /** Documents restaurables : ceux qui ont au moins une version déjà approuvée. */
-  async restorableIds(documentIds: string[], db: Db): Promise<Set<string>> {
-    if (!documentIds.length) return new Set();
+  async restoreModes(documentIds: string[], db: Db): Promise<Map<string, RestoreMode>> {
+    const out = new Map<string, RestoreMode>();
+    if (!documentIds.length) return out;
     const rows = await db.csoVersion.findMany({
-      where: { documentId: { in: documentIds }, status: { in: ['PUBLISHED', 'SUPERSEDED'] }, publishedAt: { not: null } },
-      select: { documentId: true },
-      distinct: ['documentId'],
+      where: { documentId: { in: documentIds } },
+      select: { documentId: true, status: true, versionNo: true, publishedAt: true },
     });
-    return new Set(rows.map((r) => r.documentId));
+    for (const id of documentIds) {
+      const plan = restorePlan(rows.filter((r) => r.documentId === id));
+      if (plan) out.set(id, plan.mode);
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -213,7 +211,9 @@ export class CsoWorkflowService {
 
   /**
    * Archive des documents : la version officielle devient SUPERSEDED (plus aucun contenu officiel),
-   * les versions et changements de référence en cours sont annulés. Un événement d'audit par document.
+   * les versions et changements de référence en cours sont annulés, les partages actifs révoqués
+   * (une restauration ne les réactive jamais — CSO-08) et les notifications CSO en cours résolues
+   * (CSO-09). Un événement d'audit par document.
    */
   async archiveDocuments(
     ctx: AuthContext,
@@ -225,6 +225,10 @@ export class CsoWorkflowService {
     if (!docs.length) return;
     const ids = docs.map((d) => d.id);
     const now = new Date();
+    const activeShares = await db.csoShare.findMany({ where: { documentId: { in: ids }, revokedAt: null }, select: { id: true, documentId: true } });
+    if (activeShares.length) {
+      await db.csoShare.updateMany({ where: { id: { in: activeShares.map((s) => s.id) } }, data: { revokedAt: now, revokedById: ctx.userId } });
+    }
     await db.csoVersion.updateMany({
       where: { documentId: { in: ids }, status: 'PUBLISHED' },
       data: { status: 'SUPERSEDED', supersededAt: now, lockVersion: { increment: 1 } },
@@ -239,6 +243,8 @@ export class CsoWorkflowService {
     });
     await db.csoDocument.updateMany({ where: { id: { in: ids } }, data: { status: 'ARCHIVED', archivedAt: now, archivedById: ctx.userId } });
     for (const d of docs) {
+      await this.notifications.resolveForEntity('cso_document', d.id, 'cso.', db);
+      const revokedShareIds = activeShares.filter((s) => s.documentId === d.id).map((s) => s.id);
       await this.audit.record(
         ctx,
         {
@@ -249,7 +255,7 @@ export class CsoWorkflowService {
           vesselId: d.vesselId,
           before: { status: d.status },
           after: { status: 'ARCHIVED' },
-          metadata: { reason, ...meta },
+          metadata: { reason, ...meta, ...(revokedShareIds.length ? { revokedShareIds } : {}) },
         },
         db,
       );
@@ -257,8 +263,11 @@ export class CsoWorkflowService {
   }
 
   /**
-   * Restaure des documents archivés : statut DRAFT (non officiel) + version de restauration
-   * PENDING_APPROVAL réutilisant le dernier blob officiel — nouvelle approbation obligatoire (CSO-011/020).
+   * Restaure des documents archivés : statut DRAFT (non officiel) puis, selon `restorePlan` (CSO-03) :
+   *  - déjà approuvé : version de restauration PENDING_APPROVAL réutilisant le dernier blob officiel —
+   *    nouvelle approbation obligatoire (CSO-011/020) ;
+   *  - jamais approuvé : version BROUILLON réutilisant le dernier fichier déposé (aucun validateur
+   *    sollicité ; le restaurateur, devenu déposant, la soumet ou l'annule).
    */
   async restoreDocuments(
     ctx: AuthContext,
@@ -269,17 +278,18 @@ export class CsoWorkflowService {
   ): Promise<{ doc: CsoDocument; version: CsoVersion }[]> {
     const out: { doc: CsoDocument; version: CsoVersion }[] = [];
     for (const d of docs) {
-      const source = await this.lastOfficialVersion(d.id, db);
-      if (!source) {
-        throw Errors.business(`Document ${d.reference ?? d.title} jamais approuvé : restauration impossible (aucune version officielle à rétablir)`, {
-          documentId: d.id,
-        });
+      const plan = restorePlan(await db.csoVersion.findMany({ where: { documentId: d.id } }));
+      if (!plan) {
+        throw Errors.business(`Document ${d.reference ?? d.title} sans aucune version : restauration impossible`, { documentId: d.id });
       }
+      const source = plan.source;
       const version = await this.createVersion(
         ctx,
         d,
         { cloneFromFileId: source.fileId },
-        { status: 'PENDING_APPROVAL', isRestoration: true, changeNote: `Restauration de la version v${source.versionNo}` },
+        plan.mode === 'APPROVAL'
+          ? { status: 'PENDING_APPROVAL', isRestoration: true, changeNote: `Restauration de la version v${source.versionNo}` }
+          : { status: 'DRAFT', changeNote: `Brouillon repris de la version v${source.versionNo} (jamais approuvée) après restauration` },
         db,
       );
       const updated = await db.csoDocument.update({ where: { id: d.id }, data: { status: 'DRAFT', archivedAt: null, archivedById: null } });
@@ -292,7 +302,7 @@ export class CsoWorkflowService {
           entityId: d.id,
           vesselId: d.vesselId,
           before: { status: d.status },
-          after: { status: 'DRAFT', restorationVersionId: version.id, sourceVersionNo: source.versionNo },
+          after: { status: 'DRAFT', restorationVersionId: version.id, sourceVersionNo: source.versionNo, restoreMode: plan.mode },
           metadata: { reason, ...meta },
         },
         db,
@@ -307,7 +317,8 @@ export class CsoWorkflowService {
   // ---------------------------------------------------------------------------
 
   /** Informe les validateurs éligibles (dossier le plus proche, ACL approve, jamais le soumetteur). */
-  async notifyValidators(doc: CsoDocument, version: Pick<CsoVersion, 'id' | 'versionNo' | 'submittedById' | 'isRestoration'>): Promise<void> {
+  async notifyValidators(doc: CsoDocument, version: Pick<CsoVersion, 'id' | 'versionNo' | 'submittedById' | 'isRestoration' | 'status'>): Promise<void> {
+    if (version.status !== 'PENDING_APPROVAL') return;
     try {
       const folder = await this.prisma.csoFolder.findUniqueOrThrow({ where: { id: doc.folderId }, select: { path: true } });
       const config = await this.csoAccess.validatorsFor(folder.path);

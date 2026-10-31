@@ -5,6 +5,7 @@ import { Anchor, Ban, CalendarPlus, ExternalLink, LogOut, Repeat2, Ship } from '
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState, type ReactNode } from 'react';
+import { CreatedBy } from '@/components/amc/created-by';
 import {
   CancelAssignmentDialog,
   JoinAssignmentDialog,
@@ -99,6 +100,11 @@ function CrewRoster() {
     relievesAssignmentId: a.relievesAssignmentId,
     relievesName: a.relievesAssignmentId ? names.get(a.relievesAssignmentId) ?? null : null,
     actualJoinDate: a.actualJoinDate,
+    memberId: a.memberId,
+    vesselId: a.vesselId,
+    voyageId: a.voyageId,
+    createdBy: a.createdBy ?? null,
+    createdAt: a.createdAt,
   });
 
   const today = todayYmd();
@@ -276,6 +282,9 @@ function CrewRoster() {
                         <th scope="col" className="hidden lg:table-cell">
                           Relève de
                         </th>
+                        <th scope="col" className="hidden md:table-cell">
+                          Planifié par
+                        </th>
                         {canAssign && (
                           <th scope="col" className="text-right">
                             Actions
@@ -299,6 +308,9 @@ function CrewRoster() {
                           </td>
                           <td className="tabular">{fmtDate(a.plannedSignOffDate)}</td>
                           <td className="hidden lg:table-cell">{a.relievesAssignmentId ? names.get(a.relievesAssignmentId) ?? 'Affectation hors liste' : '—'}</td>
+                          <td className="hidden md:table-cell">
+                            {a.createdBy ? <CreatedBy by={a.createdBy} at={a.createdAt} verb="Planifié" compact /> : <span className="text-ink-soft">—</span>}
+                          </td>
                           {canAssign && (
                             <td>
                               <div className="flex flex-wrap justify-end gap-1">

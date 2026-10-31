@@ -2,7 +2,7 @@
 
 import { RENEWAL_STATUS_LABELS, VALIDITY_LABELS, VALIDITY_STATUSES } from '@amc/types';
 import { useQuery } from '@tanstack/react-query';
-import { ExternalLink, FolderTree, Info, Plus, RotateCcw, Search, Settings2, ShieldCheck, Ship, UserRound, X } from 'lucide-react';
+import { ArrowRight, ExternalLink, Eye, FolderTree, Info, Layers, Plus, RotateCcw, Search, Settings2, ShieldCheck, Ship, UserRound, X } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
@@ -16,14 +16,20 @@ import { DataTable, type Column } from '@/components/ui/data-table';
 import { Checkbox, Input, Select } from '@/components/ui/field';
 import { FilterBar, PageHeader } from '@/components/ui/page';
 import { EmptyState, Forbidden, LoadingBlock } from '@/components/ui/states';
+import { FilePreviewDialog } from '@/components/amc/file-preview';
+import { ResourceExportButton } from '@/components/amc/resource-export';
 import { CertificateFormDialog } from '@/components/certificates/certificate-form';
 import { CertificateSidePanel } from '@/components/certificates/certificate-side-panel';
 import { certKeys, useDebounced, useMediaQuery, useRefreshCertificates } from '@/components/certificates/lib';
 import { ArchivedBadge, DocumentBadge, ExpiryCell, OpenRequestBadge, RenewalBadge, SubjectLink } from '@/components/certificates/status';
+import { CategorySection, FolderSection, FolderSelect, TreeItem, useCertificateCategories, useCertificateFolders } from '@/components/certificates/tree';
 import type { CertificateListItem, CertificateTypeDto, RequestListItem } from '@/components/certificates/types';
 
+// Par défaut : échéances à venir d'abord, puis expirés récents (UI-08) — les tris explicites restent proposés
+const DEFAULT_SORT = 'upcoming';
 const SORTS: Record<string, string> = {
-  'expiryOn:asc': 'Échéance la plus proche',
+  upcoming: 'À échoir d’abord',
+  'expiryOn:asc': 'Échéance croissante (expirés anciens d’abord)',
   'expiryOn:desc': 'Échéance la plus lointaine',
   'updatedAt:desc': 'Dernière mise à jour',
   'createdAt:desc': 'Création la plus récente',
@@ -60,38 +66,6 @@ function FilterSelect({
   );
 }
 
-function TreeItem({
-  active,
-  onClick,
-  icon,
-  children,
-  depth = 0,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon?: ReactNode;
-  children: ReactNode;
-  depth?: number;
-}) {
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={onClick}
-        aria-current={active ? 'true' : undefined}
-        className={cn(
-          'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-sm hover:bg-navy-50',
-          depth === 1 && 'pl-6',
-          active ? 'bg-action-50 font-semibold text-navy' : 'text-ink',
-        )}
-      >
-        {icon}
-        <span className="min-w-0 truncate">{children}</span>
-      </button>
-    </li>
-  );
-}
-
 export default function CertificatesExplorerPage() {
   return (
     <Suspense fallback={<LoadingBlock rows={8} />}>
@@ -108,6 +82,7 @@ function Explorer() {
   const wide = useMediaQuery('(min-width: 1280px)');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [preview, setPreview] = useState<CertificateListItem | null>(null);
 
   const mine = sp.get('mine');
   // Lien dashboard « demandes retournées » : boîte « Mes demandes » filtrée
@@ -120,6 +95,7 @@ function Explorer() {
     subjectKind: sp.get('subjectKind') ?? '',
     typeId: sp.get('typeId') ?? '',
     category: sp.get('category') ?? '',
+    folderId: sp.get('folderId') ?? '',
     validity: sp.get('validity') ?? '',
     expiringWithinDays: sp.get('expiringWithinDays') ?? '',
     renewalStatus: sp.get('renewalStatus') ?? (mine === 'renewal' ? 'IN_PROGRESS' : ''),
@@ -127,7 +103,9 @@ function Explorer() {
     pendingApproval: sp.get('pendingApproval') ?? '',
     archived: sp.get('archived') === 'true',
     vesselId: sp.get('vesselId') ?? '',
-    sort: sp.get('sort') && SORTS[sp.get('sort')!] ? sp.get('sort')! : 'expiryOn:asc',
+    // Liens du tableau de bord : navires + équipages affectés, mêmes chiffres que ses compteurs (ADM-06)
+    vesselIds: sp.get('vesselIds') ?? '',
+    sort: sp.get('sort') && SORTS[sp.get('sort')!] ? sp.get('sort')! : DEFAULT_SORT,
   };
 
   const setParams = (patch: Record<string, string | null>) => {
@@ -149,7 +127,7 @@ function Explorer() {
 
   // Navire : filtre explicite (URL) sinon navire unique du Vessel Switcher
   const switcherVessel = selectedVesselIds.length === 1 ? selectedVesselIds[0] : '';
-  const vesselId = f.vesselId || switcherVessel;
+  const vesselId = f.vesselId || (f.vesselIds ? '' : switcherVessel);
   const vesselOptions = selectedVesselIds.length > 1 ? me.accessibleVessels.filter((v) => selectedVesselIds.includes(v.id)) : me.accessibleVessels;
   const canMemberCerts = can('members.certificates.view');
 
@@ -162,10 +140,11 @@ function Explorer() {
       vesselId: vesselId && f.subjectKind !== 'MEMBER' ? vesselId : undefined,
       crewVesselId: vesselId && f.subjectKind === 'MEMBER' ? vesselId : undefined,
       // Plusieurs navires dans le Vessel Switcher : filtre serveur (navires + équipages affectés)
-      vesselIds: !vesselId && selectedVesselIds.length > 1 ? selectedVesselIds.join(',') : undefined,
+      vesselIds: vesselId ? undefined : f.vesselIds || (selectedVesselIds.length > 1 ? selectedVesselIds.join(',') : undefined),
       renewalOwner: mine === 'renewal' ? 'me' : undefined,
       typeId: f.typeId || undefined,
       category: f.category || undefined,
+      folderId: f.folderId || undefined,
       validity: f.validity || undefined,
       expiringWithinDays: f.expiringWithinDays || undefined,
       renewalStatus: f.renewalStatus || undefined,
@@ -188,14 +167,15 @@ function Explorer() {
     enabled: can('certificates.view'),
     staleTime: 60_000,
   });
+  // Arborescence : dossiers de classement et référentiel des catégories
+  const folders = useCertificateFolders(can('certificates.view'));
+  const categoryRefs = useCertificateCategories(can('certificates.view'));
   const categories = useMemo(() => {
-    const set = new Map<string, Set<string>>();
-    for (const t of types.data ?? []) {
-      if (!set.has(t.category)) set.set(t.category, new Set());
-      set.get(t.category)!.add(t.subjectKind);
-    }
-    return [...set.entries()].map(([name, kinds]) => ({ name, kinds })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [types.data]);
+    if (categoryRefs.data) return categoryRefs.data;
+    const names = [...new Set((types.data ?? []).map((t) => t.category))].sort((a, b) => a.localeCompare(b));
+    return names.map((name) => ({ id: null, name, sortOrder: 0, typeCount: 1, subjectKinds: [], certificateCount: 0 }));
+  }, [categoryRefs.data, types.data]);
+  const folderList = folders.data ?? [];
   const typeOptions = (types.data ?? []).filter((t) => !f.subjectKind || t.subjectKind === f.subjectKind);
 
   const toApprove = useQuery({
@@ -209,7 +189,7 @@ function Explorer() {
   if (mine === 'returned') return <LoadingBlock rows={4} label="Redirection vers vos demandes…" />;
 
   const activeFilters =
-    [f.search, f.subjectKind, f.typeId, f.category, f.validity, f.expiringWithinDays, f.renewalStatus, f.documentMissing, f.pendingApproval, f.vesselId, mine].filter(Boolean).length +
+    [f.search, f.subjectKind, f.typeId, f.category, f.folderId, f.validity, f.expiringWithinDays, f.renewalStatus, f.documentMissing, f.pendingApproval, f.vesselId, f.vesselIds, mine].filter(Boolean).length +
     (f.archived ? 1 : 0);
 
   const resetFilters = () => {
@@ -217,11 +197,14 @@ function Explorer() {
     router.replace('/certificates', { scroll: false });
   };
 
-  const selectTree = (patch: Record<string, string | null>) => setParams({ subjectKind: null, vesselId: null, category: null, typeId: null, ...patch });
+  const selectTree = (patch: Record<string, string | null>) =>
+    setParams({ subjectKind: null, vesselId: null, vesselIds: null, category: null, typeId: null, folderId: null, ...patch });
   // Navire sans titulaire explicite = certificats du navire (même règle que l'API)
   const treeKind = f.subjectKind || (f.vesselId ? 'VESSEL' : '');
   const treeIs = (subjectKind: string, vessel: string, category: string) =>
-    treeKind === subjectKind && f.vesselId === vessel && f.category === category && !f.typeId;
+    treeKind === subjectKind && f.vesselId === vessel && f.category === category && !f.typeId && !f.folderId;
+  // Document officiel présent : aperçu au clic sur la ligne (le serveur revérifie les droits)
+  const hasDocument = (r: CertificateListItem) => r.hasCurrentRevision && !r.documentMissing;
 
   const columns: Column<CertificateListItem>[] = [
     {
@@ -239,6 +222,7 @@ function Explorer() {
           <p className="font-medium text-ink">{r.type.name}</p>
           <p className="text-xs text-ink-muted">
             {r.type.code} — {r.type.category}
+            {r.folder && !f.folderId && <span className="text-ink-soft"> · {r.folder.name}</span>}
           </p>
         </div>
       ),
@@ -279,15 +263,31 @@ function Explorer() {
       header: <span className="sr-only">Ouvrir</span>,
       align: 'right',
       cell: (r) => (
-        <Link
-          href={`/certificates/${r.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-muted hover:bg-navy-50 hover:text-action"
-          aria-label={`Ouvrir la fiche ${r.type.name} — ${r.subject.label}`}
-          title="Ouvrir la fiche complète"
-        >
-          <ExternalLink className="h-4 w-4" aria-hidden />
-        </Link>
+        <div className="flex items-center justify-end">
+          {hasDocument(r) && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPreview(r);
+              }}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-muted hover:bg-navy-50 hover:text-action"
+              aria-label={`Aperçu du document — ${r.type.name} — ${r.subject.label}`}
+              title="Aperçu du document officiel"
+            >
+              <Eye className="h-4 w-4" aria-hidden />
+            </button>
+          )}
+          <Link
+            href={`/certificates/${r.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-muted hover:bg-navy-50 hover:text-action"
+            aria-label={`Ouvrir la fiche ${r.type.name} — ${r.subject.label}`}
+            title="Ouvrir la fiche complète"
+          >
+            <ExternalLink className="h-4 w-4" aria-hidden />
+          </Link>
+        </div>
       ),
     },
   ];
@@ -322,6 +322,11 @@ function Explorer() {
                 <Settings2 className="h-4 w-4" aria-hidden /> Configuration
               </Link>
             )}
+            <ResourceExportButton
+              resource="certificates"
+              filters={{ vesselId: vesselId && f.subjectKind !== 'MEMBER' ? vesselId : undefined, subjectKind: f.subjectKind || undefined, includeArchived: f.archived ? 'true' : undefined }}
+              title="Filtres appliqués à l'export : navire, titulaire et archivés ; les autres filtres de l'écran ne sont pas repris"
+            />
             {can('certificates.create') && (
               <Button onClick={() => setCreateOpen(true)}>
                 <Plus className="h-4 w-4" aria-hidden /> Nouveau certificat
@@ -353,7 +358,7 @@ function Explorer() {
           <option value="VESSEL">Navires</option>
           {canMemberCerts && <option value="MEMBER">Marins</option>}
         </FilterSelect>
-        <FilterSelect label={f.subjectKind === 'MEMBER' ? 'Équipage du navire' : 'Navire'} value={f.vesselId || switcherVessel} onChange={(v) => setParams({ vesselId: v })} className="w-44">
+        <FilterSelect label={f.subjectKind === 'MEMBER' ? 'Équipage du navire' : 'Navire'} value={vesselId} onChange={(v) => setParams({ vesselId: v, vesselIds: null })} className="w-44">
           <option value="">{selectedVesselIds.length > 1 ? 'Navires sélectionnés' : 'Tous les navires'}</option>
           {vesselOptions.map((v) => (
             <option key={v.id} value={v.id}>
@@ -369,6 +374,21 @@ function Explorer() {
             </option>
           ))}
         </FilterSelect>
+        {folderList.length > 0 && (
+          <div className="w-44 min-w-0">
+            <label htmlFor="cert-folder" className="mb-1 block text-xs font-medium text-ink-muted">
+              Dossier
+            </label>
+            <FolderSelect
+              id="cert-folder"
+              value={f.folderId === 'none' ? '' : f.folderId}
+              onChange={(v) => setParams({ folderId: v })}
+              folders={folderList}
+              emptyLabel="Tous les dossiers"
+              className="h-8 text-sm"
+            />
+          </div>
+        )}
         <FilterSelect label="Catégorie" value={f.category} onChange={(v) => setParams({ category: v })} className="w-36">
           <option value="">Toutes</option>
           {categories.map((c) => (
@@ -415,7 +435,7 @@ function Explorer() {
           <option value="true">En attente</option>
           <option value="false">Sans attente</option>
         </FilterSelect>
-        <FilterSelect label="Tri" value={f.sort} onChange={(v) => setParams({ sort: v === 'expiryOn:asc' ? null : v })} className="w-56">
+        <FilterSelect label="Tri" value={f.sort} onChange={(v) => setParams({ sort: v === DEFAULT_SORT ? null : v })} className="w-56">
           {Object.entries(SORTS).map(([k, l]) => (
             <option key={k} value={k}>
               {l}
@@ -430,7 +450,7 @@ function Explorer() {
         )}
       </FilterBar>
 
-      {(mine === 'renewal' || (vesselId && !f.vesselId) || selectedVesselIds.length > 1 || (vesselId && f.subjectKind !== 'MEMBER')) && (
+      {(mine === 'renewal' || (vesselId && !f.vesselId) || selectedVesselIds.length > 1 || (vesselId && f.subjectKind !== 'MEMBER') || (!vesselId && f.vesselIds)) && (
         <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-ink-muted" aria-live="polite">
           <Info className="h-3.5 w-3.5" aria-hidden />
           {mine === 'renewal' && (
@@ -442,7 +462,12 @@ function Explorer() {
             </Badge>
           )}
           {vesselId && !f.vesselId && <span>Navire du sélecteur appliqué : {vesselById(vesselId)?.name ?? 'navire'}.</span>}
-          {selectedVesselIds.length > 1 && !vesselId && (
+          {!vesselId && f.vesselIds && (
+            <span>
+              Certificats de {f.vesselIds.split(',').map((id) => vesselById(id)?.name ?? 'navire').join(', ')} et de l’équipage affecté.
+            </span>
+          )}
+          {selectedVesselIds.length > 1 && !vesselId && !f.vesselIds && (
             <span>{selectedVesselIds.length} navires sélectionnés : certificats de ces navires et de leurs équipages affectés.</span>
           )}
           {vesselId && f.subjectKind !== 'MEMBER' && canMemberCerts && (
@@ -468,7 +493,7 @@ function Explorer() {
             <FolderTree className="h-3.5 w-3.5" aria-hidden /> Arborescence
           </p>
           <ul className="space-y-0.5">
-            <TreeItem active={treeIs('', '', '')} onClick={() => selectTree({})}>
+            <TreeItem active={treeIs('', '', '')} onClick={() => selectTree({})} icon={<Layers className="h-4 w-4 text-teal-700" aria-hidden />}>
               Tous les certificats
             </TreeItem>
             <TreeItem active={treeIs('VESSEL', '', '')} onClick={() => selectTree({ subjectKind: 'VESSEL' })} icon={<Ship className="h-4 w-4 text-teal-700" aria-hidden />}>
@@ -492,18 +517,8 @@ function Explorer() {
               </>
             )}
           </ul>
-          {categories.length > 0 && (
-            <>
-              <p className="mt-3 px-2 pb-1 text-xs font-semibold text-ink-muted">Catégories</p>
-              <ul className="space-y-0.5">
-                {categories.map((c) => (
-                  <TreeItem key={c.name} active={treeIs('', '', c.name)} onClick={() => selectTree({ category: c.name })}>
-                    {c.name}
-                  </TreeItem>
-                ))}
-              </ul>
-            </>
-          )}
+          <FolderSection folders={folderList} selectedId={f.folderId} onSelect={(id) => selectTree({ folderId: id })} />
+          <CategorySection categories={categories} selected={treeIs('', '', f.category) ? f.category : ''} onSelect={(name) => selectTree({ category: name })} />
         </nav>
 
         <div className="min-w-0">
@@ -516,6 +531,12 @@ function Explorer() {
             onRetry={() => list.refetch()}
             selectedId={selectedId}
             onRowClick={(r) => {
+              // Document disponible : aperçu immédiat (et détail dans le panneau latéral si l'écran le permet)
+              if (hasDocument(r)) {
+                setPreview(r);
+                if (wide) setSelectedId(r.id);
+                return;
+              }
               if (wide) setSelectedId((cur) => (cur === r.id ? null : r.id));
               else router.push(`/certificates/${r.id}`);
             }}
@@ -542,12 +563,32 @@ function Explorer() {
             }
           />
           {wide && !selectedId && rows && rows.length > 0 && (
-            <p className="mt-2 text-xs text-ink-soft">Sélectionnez une ligne (clic ou Entrée) pour afficher le détail et l’aperçu du document officiel.</p>
+            <p className="mt-2 text-xs text-ink-soft">Cliquez sur une ligne (ou Entrée) : aperçu du document officiel s’il est disponible, détail dans le panneau latéral.</p>
           )}
         </div>
 
         {showPanel && selectedId && <CertificateSidePanel id={selectedId} onClose={() => setSelectedId(null)} />}
       </div>
+
+      {preview && (
+        <FilePreviewDialog
+          open
+          onOpenChange={(o) => !o && setPreview(null)}
+          title={`${preview.type.name} — ${preview.subject.label}`}
+          description={`${preview.type.code}${preview.currentNumber ? ` · N° ${preview.currentNumber}` : ''} · document officiel de la révision courante`}
+          previewPath={`/certificates/${preview.id}/preview`}
+          downloadPath={`/certificates/${preview.id}/download`}
+          canDownload={can('certificates.download_current')}
+          actions={
+            <Link
+              href={`/certificates/${preview.id}`}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-line-strong bg-white px-4 text-base font-medium text-ink hover:bg-canvas"
+            >
+              Ouvrir la fiche <ArrowRight className="h-4 w-4" aria-hidden />
+            </Link>
+          }
+        />
+      )}
 
       {createOpen && (
         <CertificateFormDialog
@@ -556,6 +597,7 @@ function Explorer() {
             subjectKind: f.subjectKind === 'MEMBER' ? 'MEMBER' : 'VESSEL',
             vesselId: f.subjectKind !== 'MEMBER' ? vesselId || null : null,
             typeId: f.typeId || null,
+            folderId: f.folderId && f.folderId !== 'none' && can('certificates.folders.manage') ? f.folderId : null,
           }}
           open={createOpen}
           onOpenChange={setCreateOpen}

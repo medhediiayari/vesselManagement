@@ -72,3 +72,16 @@ export class ListAssignmentsQuery extends createZodDto(
 ) {}
 
 export class RosterQuery extends createZodDto(z.object({ date: dateOnly.optional() })) {}
+
+/** Prévisualisation des certificats du marin sur la période d'embarquement (avertissement non bloquant). */
+export class CertificateCheckQuery extends createZodDto(
+  z
+    .object({
+      memberId: uuid,
+      vesselId: uuid,
+      plannedJoinDate: dateOnly.optional(),
+      plannedSignOffDate: dateOnly.optional(),
+      voyageId: uuid.optional(),
+    })
+    .refine(datesOrdered, datesMessage),
+) {}

@@ -1,6 +1,6 @@
 'use client';
 
-import { AlarmClock, Plus, RotateCcw, Search } from 'lucide-react';
+import { AlarmClock, AlertTriangle, Plus, RotateCcw, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Suspense, useEffect, useMemo, useState } from 'react';
@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/field';
 import { FilterBar, PageHeader } from '@/components/ui/page';
 import { EmptyState, Forbidden, LoadingBlock } from '@/components/ui/states';
 import { InvoiceFormDialog } from '@/components/purchasing/invoice-form-dialog';
-import { INVOICE_STATUS_LABELS, INVOICE_STATUS_TONES, dec, isPast, purKeys, totalsByCurrency, useDebounced, useUrlParams } from '@/components/purchasing/lib';
+import { INVOICE_STATUS_LABELS, INVOICE_STATUS_TONES, MATCH_REASON_LABELS, dec, isPast, purKeys, totalsByCurrency, useDebounced, useUrlParams } from '@/components/purchasing/lib';
 import type { InvoiceListItem } from '@/components/purchasing/types';
 import { Callout, FilterSelect, Money, StatusPill, useSuppliers } from '@/components/purchasing/ui';
 
@@ -94,7 +94,21 @@ function Invoices() {
         </span>
       ),
     },
-    { key: 'status', header: 'Statut', cell: (r) => <StatusPill status={r.status} labels={INVOICE_STATUS_LABELS} tones={INVOICE_STATUS_TONES} /> },
+    {
+      key: 'status',
+      header: 'Statut',
+      cell: (r) => (
+        <span className="flex flex-wrap items-center gap-1">
+          <StatusPill status={r.status} labels={INVOICE_STATUS_LABELS} tones={INVOICE_STATUS_TONES} />
+          {/* Écart de rapprochement : la facture garde son statut tant qu'elle n'est pas examinée (ACH-13) */}
+          {r.reconciliation?.suggestion === 'DISPUTED' && (
+            <Badge tone="danger" title={r.reconciliation.reasons.map((x) => MATCH_REASON_LABELS[x] ?? x).join(', ')} icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
+              Écart de rapprochement
+            </Badge>
+          )}
+        </span>
+      ),
+    },
   ];
 
   return (

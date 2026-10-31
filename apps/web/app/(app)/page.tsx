@@ -2,10 +2,12 @@
 
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { FileCheck2, Navigation, ShieldCheck, Ship, ShoppingCart, UsersRound } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
 import { api } from '@/lib/api';
 import { cn, fmtDate } from '@/lib/format';
 import { useSession } from '@/lib/session';
-import { ActionQueue, buildActions, buildAdminActions, sortActions } from '@/components/dashboard/action-queue';
+import { ActionQueue, buildActions, buildAdminActions, isReadOnlyProfile, sortActions } from '@/components/dashboard/action-queue';
 import { ExpiringCertificates, OngoingVoyages, RecentCsoDocuments, RecentPurchaseRequests } from '@/components/dashboard/activity-tables';
 import { AdminConsole } from '@/components/dashboard/admin-console';
 import { useAdminOverview } from '@/components/dashboard/admin-overview';
@@ -14,7 +16,8 @@ import { DonutCard, STAGE, STATE } from '@/components/dashboard/donut-card';
 import { FleetHero, type HeroKpi } from '@/components/dashboard/fleet-hero';
 import { FleetOverview } from '@/components/dashboard/fleet-overview';
 import type { DashboardData, VesselWorkspace } from '@/components/dashboard/types';
-import { ErrorState, Forbidden, Skeleton } from '@/components/ui/states';
+import { homeHref } from '@/components/shell/nav';
+import { ErrorState, LoadingBlock, Skeleton } from '@/components/ui/states';
 
 /** Synthèses navire chargées (au-delà, l'indicateur « marins à bord » n'est pas affiché plutôt qu'estimé). */
 const FLEET_BOARD_MAX = 20;
@@ -31,6 +34,7 @@ const PR_STAGES = [
 const plural = (n: number, one: string, many: string) => `${n} ${n > 1 ? many : one}`;
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
+// Heure locale du navigateur, signalée comme telle (l'horloge de l'en-tête affiche UTC et l'heure bord, UI-04)
 const dayFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const timeFmt = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
 
@@ -44,7 +48,13 @@ function donutGrid(n: number) {
 }
 
 export default function DashboardPage() {
-  const { can, selectedVesselIds, currentVessel, me } = useSession();
+  const { can, canAny, selectedVesselIds, currentVessel, me } = useSession();
+  const router = useRouter();
+  // Sans tableau de bord (ex. Crewing) : première page autorisée plutôt qu'« Accès non autorisé » (ADM-09)
+  const home = can('dashboard.view') ? '/' : homeHref(canAny);
+  useEffect(() => {
+    if (home !== '/') router.replace(home);
+  }, [home, router]);
   const q = useQuery({
     queryKey: ['dashboard', selectedVesselIds],
     queryFn: () => api.get<DashboardData>('/dashboard', { query: { vesselIds: selectedVesselIds.join(',') || undefined } }),
@@ -67,16 +77,19 @@ export default function DashboardPage() {
   });
   const admin = useAdminOverview();
 
-  if (!can('dashboard.view')) return <Forbidden />;
+  if (!can('dashboard.view')) return <LoadingBlock rows={4} label="Redirection vers votre page d’accueil…" />;
 
   const d = q.data;
   const scopeLabel = currentVessel ? currentVessel.name : selectedVesselIds.length ? `${selectedVesselIds.length} navires sélectionnés` : me.vesselScope === 'ALL_FLEET' ? 'toute la flotte' : 'vos navires';
-  const vq = selectedVesselIds.length === 1 ? `vesselId=${selectedVesselIds[0]}` : '';
+  // Navire seul : certificats du navire ET de son équipage affecté, comme les compteurs ci-dessous (ADM-06)
+  const vq = selectedVesselIds.length === 1 ? `vesselIds=${selectedVesselIds[0]}` : '';
   const withVessel = (path: string) => (vq ? `${path}${path.includes('?') ? '&' : '?'}${vq}` : path);
 
   const actions = d ? sortActions([...buildActions(d, vq ? `&${vq}` : ''), ...buildAdminActions(admin)]) : [];
   const openActions = actions.filter((a) => a.count > 0).length;
   const critical = actions.filter((a) => a.priority === 'critical').reduce((s, a) => s + a.count, 0);
+  // Profil en lecture seule (Direction) : signaler sans inviter à agir (UI-06)
+  const readOnly = isReadOnlyProfile(me.permissions);
 
   // Agrégats affichés : uniquement des valeurs réellement chargées (aucune estimation)
   const crews = workspaces.map((w) => w.data?.sections.crew).filter((c): c is { onboard: number; planned: number } => !!c);
@@ -184,12 +197,12 @@ export default function DashboardPage() {
             Situation de <span className="font-semibold text-white">{scopeLabel}</span>
             {d &&
               (openActions === 0 ? (
-                <> · aucune action en attente.</>
+                <> · {readOnly ? 'aucun point de vigilance.' : 'aucune action en attente.'}</>
               ) : (
                 <>
                   {' · '}
                   <a href="#actions-requises" className="underline decoration-white/40 underline-offset-2 hover:decoration-white">
-                    {plural(openActions, 'rubrique à traiter', 'rubriques à traiter')}
+                    {readOnly ? plural(openActions, 'point de vigilance', 'points de vigilance') : plural(openActions, 'rubrique à traiter', 'rubriques à traiter')}
                   </a>
                   {critical > 0 && <span className="font-semibold text-[#FFA197]"> dont {plural(critical, 'alerte critique', 'alertes critiques')}</span>}.
                 </>
@@ -199,7 +212,7 @@ export default function DashboardPage() {
         meta={
           generatedAt && (
             <>
-              {capitalize(dayFmt.format(generatedAt))} · <span className="tabular">données de {timeFmt.format(generatedAt)}</span>, actualisées toutes les 2 min
+              {capitalize(dayFmt.format(generatedAt))} · <span className="tabular">données de {timeFmt.format(generatedAt)} (heure locale)</span>, actualisées toutes les 2 min
               {me.roles.length > 0 && <> · vue {me.roles.map((r) => r.name).join(', ')}</>}
             </>
           )
@@ -317,15 +330,17 @@ export default function DashboardPage() {
             <DashboardCard
               title={
                 <>
-                  Actions requises
+                  {readOnly ? 'Points de vigilance' : 'Actions requises'}
                   {openActions > 0 && <span className="tabular ml-2 rounded bg-navy px-1.5 py-px align-middle text-xs font-semibold text-white">{openActions}</span>}
                 </>
               }
-              meta="Classées par priorité, dans votre périmètre et selon vos droits"
+              meta={readOnly ? 'Classés par priorité, dans votre périmètre — consultation seule' : 'Classées par priorité, dans votre périmètre et selon vos droits'}
               bodyClassName="px-0 pb-0"
             >
-              <ActionQueue items={actions} />
-              <p className="px-4 py-2 text-xs text-ink-muted">Vos propres soumissions sont exclues des validations : un demandeur ne valide jamais sa propre demande.</p>
+              <ActionQueue items={actions} readOnly={readOnly} />
+              {!readOnly && (
+                <p className="px-4 py-2 text-xs text-ink-muted">Vos propres soumissions sont exclues des validations : un demandeur ne valide jamais sa propre demande.</p>
+              )}
             </DashboardCard>
           </div>
 

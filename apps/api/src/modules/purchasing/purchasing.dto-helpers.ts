@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { decimalString } from '../../common/pagination';
+import { dateOnly, decimalString } from '../../common/pagination';
 
 /** Partie entière bornée pour tenir dans DECIMAL(18,s) (pas de dépassement => pas de 500). */
 const fitsDecimal = (intDigits: number) => (s: string) => (s.replace('-', '').split('.')[0] ?? '').replace(/^0+/, '').length <= intDigits;
@@ -15,6 +15,18 @@ export const nonNegativeQty = decimalString({ min: 0, scale: 3 }).refine(fitsDec
 
 /** Montant DECIMAL(18,2) ≥ 0. */
 export const money = decimalString({ min: 0, scale: 2 }).refine(fitsDecimal(14), 'Montant trop grand');
+
+/** Montant DECIMAL(18,2) strictement positif (montant HT d'une facture — audit ACH-11). */
+export const positiveMoney = money.refine((s) => new Prisma.Decimal(s).greaterThan(0), 'Doit être > 0');
+
+/**
+ * Date AAAA-MM-JJ non future (BL : date de livraison constatée — audit ACH-11). Tolérance d'un jour : un navire
+ * à l'est de UTC peut déjà être au lendemain (même règle que la date d'une PR).
+ */
+export const pastOrTodayDate = dateOnly.refine((d) => {
+  const now = new Date();
+  return d.getTime() <= Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) + 86_400_000;
+}, 'La date ne peut pas être dans le futur');
 
 /** Prix unitaire DECIMAL(18,4) ≥ 0. */
 export const unitPrice = decimalString({ min: 0, scale: 4 }).refine(fitsDecimal(12), 'Prix trop grand');

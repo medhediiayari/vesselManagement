@@ -13,7 +13,6 @@ export const SCHEDULED_JOBS = {
   PURCHASING_FOLLOWUP: 'purchasing-followup',
   VOYAGE_NOTICES: 'voyage-notices',
   ORPHAN_FILES_CLEANUP: 'orphan-files-cleanup',
-  OUTBOX_DISPATCH: 'outbox-dispatch',
 } as const;
 
 export const DEFAULT_JOB_OPTIONS = {

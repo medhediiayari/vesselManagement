@@ -4,6 +4,7 @@ import { Auth, RequireAnyPermission, RequirePermissions } from '../../common/dec
 import type { AuthContext } from '../access/auth-context';
 import {
   CancelAssignmentDto,
+  CertificateCheckQuery,
   JoinAssignmentDto,
   ListAssignmentsQuery,
   PlanAssignmentDto,
@@ -31,6 +32,16 @@ export class CrewAssignmentsController {
   @RequirePermissions('vessel_crew.assign')
   plan(@Auth() ctx: AuthContext, @Body() dto: PlanAssignmentDto) {
     return this.crew.plan(ctx, dto);
+  }
+
+  /**
+   * Prévisualisation, avant confirmation, des certificats du marin expirés ou expirant avant la fin
+   * de la période d'embarquement (non bloquant). Déclarée avant `:id`.
+   */
+  @Get('certificate-check')
+  @RequirePermissions('vessel_crew.assign')
+  certificateCheck(@Auth() ctx: AuthContext, @Query() q: CertificateCheckQuery) {
+    return this.crew.certificateCheck(ctx, q);
   }
 
   @Get(':id')

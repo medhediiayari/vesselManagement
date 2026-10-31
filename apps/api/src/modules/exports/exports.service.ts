@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ExportFormat, Prisma } from '@prisma/client';
 import { VALIDITY_LABELS } from '@amc/types';
-import { Errors } from '../../common/errors';
+import { AppError, Errors } from '../../common/errors';
+import { escapeLike } from '../../common/utils/like';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthContext, can, vesselWhere } from '../access/auth-context';
 import { memberVisibilityWhere } from '../access/member-access';
@@ -36,6 +37,8 @@ const d = (v: Date | null | undefined) => (v ? v.toISOString().slice(0, 10) : ''
  */
 @Injectable()
 export class ExportsService {
+  private readonly logger = new Logger('Exports');
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly excel: ExcelService,
@@ -78,16 +81,21 @@ export class ExportsService {
       });
       return { ...done, link: await this.files.issueLink(ctx, file, 'download') };
     } catch (e) {
+      // Le détail (requête Prisma, chemins serveur) reste dans les journaux, jamais dans GET /exports (ADM-10)
+      if (!(e instanceof AppError)) this.logger.error(`Export ${job.id} (${resource}) en échec`, (e as Error)?.stack ?? String(e));
+      const error = e instanceof AppError ? e.message : "Erreur interne lors de la génération de l'export";
       await this.prisma.exportJob.update({
         where: { id: job.id },
-        data: { status: 'FAILED', error: String((e as Error).message ?? e).slice(0, 900), finishedAt: new Date() },
+        data: { status: 'FAILED', error: error.slice(0, 900), finishedAt: new Date() },
       });
       throw e;
     }
   }
 
-  list(ctx: AuthContext) {
-    return this.prisma.exportJob.findMany({ where: { requestedById: ctx.userId }, orderBy: { createdAt: 'desc' }, take: 50 });
+  async list(ctx: AuthContext) {
+    const jobs = await this.prisma.exportJob.findMany({ where: { requestedById: ctx.userId }, orderBy: { createdAt: 'desc' }, take: 50 });
+    // Échecs enregistrés avant ADM-10 : message Prisma brut masqué à la lecture
+    return jobs.map((j) => (j.error && /invocation|prisma|[A-Z]:\\|\/app\//i.test(j.error) ? { ...j, error: "Erreur interne lors de la génération de l'export" } : j));
   }
 
   async link(ctx: AuthContext, id: string) {
@@ -196,7 +204,7 @@ export class ExportsService {
           { module: f.module ? f.module : { in: readable } },
           auditScopeWhere(ctx),
           f.from || f.to ? { occurredAt: { gte: f.from ? new Date(f.from) : undefined, lte: f.to ? new Date(f.to) : undefined } } : {},
-          f.action ? { action: { startsWith: f.action } } : {},
+          f.action ? { action: { startsWith: escapeLike(f.action) } } : {},
         ],
       },
       orderBy: { occurredAt: 'desc' },

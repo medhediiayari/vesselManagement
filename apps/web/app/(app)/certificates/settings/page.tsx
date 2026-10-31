@@ -21,6 +21,7 @@ import { PolicyFormDialog, TypeFormDialog } from '@/components/certificates/sett
 import {
   FREQUENCY_LABELS,
   SUBJECT_KIND_LABELS,
+  type CertificateCategoryDto,
   type CertificateTypeDto,
   type ReminderPolicyDto,
   type ReminderRunResult,
@@ -57,7 +58,16 @@ export default function CertificateSettingsPage() {
     queryFn: () => api.get<ReminderPolicyDto[]>('/certificate-reminder-policies'),
     enabled: can('certificates.view'),
   });
-  const categories = useMemo(() => [...new Set((types.data ?? []).map((t) => t.category))].sort(), [types.data]);
+  // Référentiel de l'arborescence (catégories créées depuis l'explorateur) + catégories portées par les types
+  const categoryRefs = useQuery({
+    queryKey: certKeys.categories,
+    queryFn: () => api.get<CertificateCategoryDto[]>('/certificate-categories'),
+    staleTime: 60_000,
+  });
+  const categories = useMemo(
+    () => [...new Set([...(categoryRefs.data ?? []).map((c) => c.name), ...(types.data ?? []).map((t) => t.category)])].sort(),
+    [types.data, categoryRefs.data],
+  );
   const shownTypes = useMemo(() => {
     const t = term.trim().toLowerCase();
     return (types.data ?? []).filter(

@@ -39,7 +39,8 @@ interface ZipParams {
  * Téléchargement ZIP multi-documents / dossiers (CSO-023, CDC §5.3) : traitement asynchrone
  * (ExportJob + file BullMQ « exports »), droits revalidés PAR FICHIER au moment de la génération
  * (versions archivées uniquement avec droits archives), éléments non autorisés exclus sans
- * jamais être nommés (seul excludedCount est restitué), arborescence conservée, noms assainis
+ * jamais être nommés ; excludedCount ne compte que les fichiers de documents VISIBLES mais non
+ * téléchargeables ou indisponibles (rien sur l'invisible ni l'inexistant), arborescence conservée, noms assainis
  * (anti zip-slip). Demande et contenu effectif audités.
  */
 @Injectable()
@@ -203,8 +204,8 @@ export class CsoZipService {
 
     const addDocuments = async (docs: CsoDocument[], folderSegments: Map<string, string[]>) => {
       const candidates = docs.filter((d) => params.includeArchived || d.status !== 'ARCHIVED');
+      // Documents invisibles ou inexistants : écartés sans être comptés (aucun oracle d'existence — CSO-06)
       const { visible, eff } = await this.csoAccess.filterVisibleDocuments(ctx, candidates);
-      excluded += candidates.length - visible.length;
       if (!visible.length) return;
       const versions = await this.prisma.csoVersion.findMany({
         where: {
@@ -240,17 +241,13 @@ export class CsoZipService {
     // Documents sélectionnés individuellement (racine de l'archive)
     if (params.documentIds.length) {
       const docs = await this.prisma.csoDocument.findMany({ where: { id: { in: params.documentIds } } });
-      excluded += params.documentIds.length - docs.length;
       await addDocuments(docs, new Map());
     }
 
     // Dossiers sélectionnés : arborescence conservée sous le nom du dossier
     for (const folderId of params.folderIds) {
       const root = await this.prisma.csoFolder.findUnique({ where: { id: folderId } });
-      if (!root || (!params.includeArchived && root.status !== 'ACTIVE')) {
-        excluded++;
-        continue;
-      }
+      if (!root || (!params.includeArchived && root.status !== 'ACTIVE')) continue;
       const subtree = await this.prisma.csoFolder.findMany({
         where: { path: { startsWith: root.path }, ...(params.includeArchived ? {} : { status: 'ACTIVE' }) },
         orderBy: { depth: 'asc' },
@@ -260,10 +257,7 @@ export class CsoZipService {
       for (const f of subtree as CsoFolder[]) {
         const visible = this.csoAccess.folderVisible(f, fEff.get(f.id)!);
         const parentSegs = f.id === root.id ? [] : f.parentId ? segments.get(f.parentId) : undefined;
-        if (!visible || parentSegs === undefined) {
-          if (f.id === root.id || (f.parentId && segments.has(f.parentId))) excluded++;
-          continue;
-        }
+        if (!visible || parentSegs === undefined) continue;
         segments.set(f.id, [...parentSegs, sanitizeZipSegment(f.name, 'dossier')]);
       }
       if (!segments.size) continue;

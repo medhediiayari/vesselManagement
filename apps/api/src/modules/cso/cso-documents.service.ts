@@ -19,7 +19,7 @@ import {
   presentVersion,
   userLabels,
 } from './cso-presenters';
-import { DECISION_TARGET, IN_FLIGHT_VERSION, documentFileName, missingStandardFields, normalizeReference } from './cso-rules';
+import { DECISION_TARGET, IN_FLIGHT_VERSION, documentFileName, missingStandardFields, normalizeReference, restorePlan } from './cso-rules';
 import { CsoWorkflowService } from './cso-workflow.service';
 import type {
   ArchiveDto,
@@ -94,6 +94,7 @@ export class CsoDocumentsService implements OnModuleInit {
       where: { id: { in: items.map((d) => d.currentVersionId).filter((x): x is string => !!x) } },
     });
     const files = await this.prisma.storedFile.findMany({ where: { id: { in: versions.map((v) => v.fileId) } } });
+    const restoreModes = await this.workflow.restoreModes(items.filter((d) => d.status === 'ARCHIVED').map((d) => d.id), this.prisma);
     return {
       items: items.map((d) => {
         const cv = versions.find((v) => v.id === d.currentVersionId);
@@ -102,6 +103,7 @@ export class CsoDocumentsService implements OnModuleInit {
         return {
           ...presentDocumentSummary(d, { eff: e, users, category: categories.get(d.categoryId ?? '') ?? null, viaShare: viaShare.has(d.id) }),
           currentVersion: showCurrent ? presentVersion(cv, users, files.find((f) => f.id === cv.fileId)) : null,
+          ...(d.status === 'ARCHIVED' ? { restoreMode: restoreModes.get(d.id) ?? null } : {}),
         };
       }),
       nextCursor: hasMore ? items[items.length - 1].id : null,
@@ -150,6 +152,8 @@ export class CsoDocumentsService implements OnModuleInit {
       currentVersion: current ? presentVersion(current, users, fileOf(current)) : null,
       pendingVersion: inFlight ? presentVersion(inFlight, users, fileOf(inFlight)) : null,
       versions: visibleVersions.map((v) => presentVersion(v, users, fileOf(v))),
+      // Document archivé : APPROVAL (nouvelle approbation) ou DRAFT (jamais approuvé — CSO-03)
+      ...(doc.status === 'ARCHIVED' ? { restoreMode: restorePlan(versions)?.mode ?? null } : {}),
       customFields: await this.fields.visibleValues(ctx, doc, eff),
       pendingReferenceChange:
         pendingRef && (eff.edit || eff.approve || pendingRef.requestedById === ctx.userId)
@@ -452,6 +456,7 @@ export class CsoDocumentsService implements OnModuleInit {
   /**
    * Version soumise : publication directe si l'auteur a `cso.self_approve` (Super Admin, CSO…) et le droit
    * d'approbation sur le dossier ; sinon notification des validateurs (circuit normal).
+   * Règle métier en vigueur : les validateurs désignés du dossier ne sont pas exigés (CSO-05, à arbitrer).
    */
   private async publishOrNotify(ctx: AuthContext, doc: CsoDocument, version: CsoVersion) {
     if (can(ctx, 'cso.self_approve')) {
@@ -536,7 +541,8 @@ export class CsoDocumentsService implements OnModuleInit {
       return tx.csoVersion.findUniqueOrThrow({ where: { id: v.id } });
     });
     await this.notifications.resolveForEntity('cso_document', doc.id, 'cso.version_pending');
-    await this.workflow.notifyDecision(doc, updated, dto.decision, dto.comment);
+    // Publication directe : l'auteur est aussi le décideur, rien à lui notifier (CSO-12)
+    if (!opts.selfApprove) await this.workflow.notifyDecision(doc, updated, dto.decision, dto.comment);
     return this.presentOne(updated);
   }
 
@@ -552,23 +558,37 @@ export class CsoDocumentsService implements OnModuleInit {
     const folders = await this.prisma.csoFolder.findMany({ where: { id: { in: visible.map((d) => d.folderId) } }, select: { id: true, path: true } });
     const out = [];
     const users = await userLabels(this.prisma, pending.map((v) => v.submittedById));
+    const validatorsCache = new Map<string, Awaited<ReturnType<CsoAccessService['validatorsFor']>>>();
+    const eligibleIn = async (folderId: string, folderPath: string) => {
+      if (!validatorsCache.has(folderId)) validatorsCache.set(folderId, await this.csoAccess.validatorsFor(folderPath));
+      return this.csoAccess.isEligibleValidator(ctx, validatorsCache.get(folderId)!);
+    };
     for (const d of visible) {
-      if (!eff.get(d.id)!.approve) continue;
+      const e = eff.get(d.id)!;
+      if (!e.approve) continue;
       const path = folders.find((f) => f.id === d.folderId)!.path;
-      if (!this.csoAccess.isEligibleValidator(ctx, await this.csoAccess.validatorsFor(path))) continue;
+      if (!(await eligibleIn(d.folderId, path))) continue;
       const v = pending.find((p) => p.documentId === d.id)!;
-      out.push({ document: presentDocumentSummary(d), version: presentVersion(v, users) });
+      out.push({ document: presentDocumentSummary(d, { eff: e }), version: presentVersion(v, users) });
     }
     const refRequests = await this.prisma.csoReferenceChangeRequest.findMany({
       where: { status: 'PENDING_APPROVAL', requestedById: { not: ctx.userId } },
       take: 200,
     });
-    const refDocs = await this.prisma.csoDocument.findMany({ where: { id: { in: refRequests.map((r) => r.documentId) } } });
+    const refDocs = await this.prisma.csoDocument.findMany({ where: { id: { in: refRequests.map((r) => r.documentId) }, status: { not: 'ARCHIVED' } } });
     const refVisible = await this.csoAccess.filterVisibleDocuments(ctx, refDocs);
+    const refFolders = await this.prisma.csoFolder.findMany({ where: { id: { in: refVisible.visible.map((d) => d.folderId) } }, select: { id: true, path: true } });
+    // Mêmes conditions que decideReferenceChange : approve + validateur désigné du dossier (CSO-07)
+    const decidableRefDocs = new Set<string>();
+    for (const d of refVisible.visible) {
+      if (!refVisible.eff.get(d.id)!.approve) continue;
+      const path = refFolders.find((f) => f.id === d.folderId)!.path;
+      if (await eligibleIn(d.folderId, path)) decidableRefDocs.add(d.id);
+    }
     return {
       versions: out,
       referenceChanges: refRequests
-        .filter((r) => refVisible.visible.some((d) => d.id === r.documentId && refVisible.eff.get(d.id)!.approve))
+        .filter((r) => decidableRefDocs.has(r.documentId))
         .map((r) => ({ id: r.id, documentId: r.documentId, oldReference: r.oldReference, newReference: r.newReference, reason: r.reason, createdAt: r.createdAt })),
     };
   }
@@ -798,19 +818,27 @@ export class CsoDocumentsService implements OnModuleInit {
   /** Archivage d'un document obsolète (aucune suppression) — cso.edit + ACL edit. */
   async archive(ctx: AuthContext, id: string, dto: ArchiveDto) {
     const { doc } = await this.csoAccess.assertDocument(ctx, id, ['edit'], { requireNotArchived: true });
+    // Partages révoqués et notifications résolues par archiveDocuments (CSO-08/09)
     await this.prisma.$transaction((tx) => this.workflow.archiveDocuments(ctx, [doc], dto.reason, {}, tx));
-    await this.notifications.resolveForEntity('cso_document', doc.id, 'cso.');
     return { id, status: 'ARCHIVED' };
   }
 
-  /** Restauration : nouvelle approbation obligatoire avant republication (CSO-011). */
+  /**
+   * Restauration : nouvelle approbation obligatoire avant republication (CSO-011) ; un document jamais
+   * approuvé revient en brouillon avec son dernier fichier (CSO-03, `restoredAs: 'DRAFT'`).
+   */
   async restore(ctx: AuthContext, id: string, dto: RestoreDocumentDto) {
     const { doc, folder } = await this.csoAccess.assertDocument(ctx, id, ['restore', 'view_archived']);
     if (doc.status !== 'ARCHIVED') throw Errors.invalidState('Document non archivé');
     if (folder.status !== 'ACTIVE') throw Errors.business('Le dossier du document est archivé : restaurer le dossier (restauration sélective)');
     const [res] = await this.prisma.$transaction((tx) => this.workflow.restoreDocuments(ctx, [doc], dto.reason, {}, tx));
     await this.workflow.notifyValidators(res.doc, res.version);
-    return { id, status: res.doc.status, pendingVersion: await this.presentOne(res.version) };
+    return {
+      id,
+      status: res.doc.status,
+      restoredAs: res.version.status === 'DRAFT' ? ('DRAFT' as const) : ('PENDING_APPROVAL' as const),
+      pendingVersion: await this.presentOne(res.version),
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -842,7 +870,9 @@ export class CsoDocumentsService implements OnModuleInit {
   async versionLink(ctx: AuthContext, versionId: string, mode: 'preview' | 'download') {
     const v = await this.loadVersion(versionId);
     const file = await this.files.getOrThrow(v.fileId);
-    const grant = await this.versionGrant(ctx, v, mode, file);
+    // Un « aperçu » de Word / Excel… est servi en pièce jointe : il exige le droit de téléchargement (CSO-01)
+    const authMode: FileAccessMode = mode === 'preview' && !isPreviewableKind(file.kind) ? 'download' : mode;
+    const grant = await this.versionGrant(ctx, v, authMode, file);
     return this.files.issueLink(ctx, file, mode, grant);
   }
 
@@ -852,6 +882,11 @@ export class CsoDocumentsService implements OnModuleInit {
     if (!doc.currentVersionId) throw Errors.notFound('Version officielle');
     return this.versionLink(ctx, doc.currentVersionId, mode);
   }
+}
+
+/** Formats affichables en ligne (même règle que FilesService.issueLink). */
+function isPreviewableKind(kind: string | null | undefined): boolean {
+  return kind === 'PDF' || kind === 'IMAGE';
 }
 
 function pickMeta(d: Pick<CsoDocument, 'title' | 'description' | 'nextReviewOn' | 'expiryOn' | 'categoryId'>) {

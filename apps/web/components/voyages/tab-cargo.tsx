@@ -56,6 +56,15 @@ function decError(v: string, scale: number, intDigits: number): string | undefin
 }
 const dec = (v: string) => (v.trim() ? v.trim().replace(',', '.') : null);
 
+/** Avertissement non bloquant (audit FLT-19) : quantité réelle hors de l'intervalle prévu. */
+function quantityWarning(min: string | null, max: string | null, actual: string | null, unit: string): string | null {
+  if (!actual) return null;
+  const a = Number(actual);
+  if (max && a > Number(max)) return `Quantité réelle supérieure au maximum prévu (${fmtDecimal(max)} ${unit}) : vérifier la saisie ou l’option.`;
+  if (min && a < Number(min)) return `Quantité réelle inférieure au minimum prévu (${fmtDecimal(min)} ${unit}) : vérifier la saisie ou l’option.`;
+  return null;
+}
+
 function CargoDialog({ open, onOpenChange, voyageId, cargo }: { open: boolean; onOpenChange: (o: boolean) => void; voyageId: string; cargo: CargoRow | null }) {
   const [f, setF] = useState<CargoForm>(() => init(cargo));
   const [error, setError] = useState<unknown>(null);
@@ -77,6 +86,7 @@ function CargoDialog({ open, onOpenChange, voyageId, cargo }: { open: boolean; o
     !errs.qtyMinMt && !errs.qtyMaxMt && dec(f.qtyMinMt) && dec(f.qtyMaxMt) && Number(dec(f.qtyMinMt)) > Number(dec(f.qtyMaxMt))
       ? 'Minimum supérieur au maximum'
       : undefined;
+  const outOfRange = Object.values(errs).some(Boolean) ? null : quantityWarning(dec(f.qtyMinMt), dec(f.qtyMaxMt), dec(f.qtyActualMt), f.unit.trim() || 'MT');
   const invalid = f.commodity.trim().length < 2 || !f.unit.trim() || Object.values(errs).some(Boolean) || !!minMax;
   const save = useOp(
     () => {
@@ -136,6 +146,11 @@ function CargoDialog({ open, onOpenChange, voyageId, cargo }: { open: boolean; o
           <TextInputField label="Quantité réelle" inputMode="decimal" value={f.qtyActualMt} onChange={set('qtyActualMt')} error={errs.qtyActualMt} />
           <TextInputField label="Option" value={f.quantityOption} onChange={set('quantityOption')} maxLength={120} placeholder="owners option" />
         </div>
+        {outOfRange && (
+          <p className="flex items-start gap-1.5 text-sm text-warn" role="status">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> {outOfRange}
+          </p>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <TextInputField label="Stowage factor" inputMode="decimal" value={f.stowageFactor} onChange={set('stowageFactor')} error={errs.stowageFactor} />
           <TextInputField label="Unité du stowage factor" value={f.stowageFactorUnit} onChange={set('stowageFactorUnit')} maxLength={32} placeholder="cbft/MT WOG" />
@@ -214,7 +229,14 @@ export function CargoTab({ ws }: { ws: VoyageWorkspace }) {
                 </div>
                 <div>
                   <dt className="text-xs text-ink-muted">Quantité réelle</dt>
-                  <dd className="tabular">{c.qtyActualMt ? `${fmtDecimal(c.qtyActualMt)} ${c.unit}` : '—'}</dd>
+                  <dd className="tabular">
+                    {c.qtyActualMt ? `${fmtDecimal(c.qtyActualMt)} ${c.unit}` : '—'}
+                    {quantityWarning(c.qtyMinMt, c.qtyMaxMt, c.qtyActualMt, c.unit) && (
+                      <span className="mt-0.5 flex items-center gap-1 text-xs text-warn">
+                        <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> Hors de l’intervalle prévu
+                      </span>
+                    )}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-ink-muted">Stowage factor</dt>

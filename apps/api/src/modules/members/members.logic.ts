@@ -1,4 +1,4 @@
-import type { CrewAssignmentStatus, CustomFieldType, ExpiryKind, MemberStatus } from '@prisma/client';
+import type { CrewAssignmentStatus, CustomFieldType, ExpiryKind, MemberStatus, Prisma } from '@prisma/client';
 
 /**
  * Règles pures du module Members (sans accès base) : normalisation des identifiants,
@@ -40,6 +40,15 @@ export function normalizeRef(v: string | null | undefined): string | null {
   if (v === null || v === undefined) return null;
   const s = String(v).trim().toUpperCase().replace(/\s+/g, '');
   return s.length ? s : null;
+}
+
+/**
+ * Clé de recherche d'un identifiant officiel : majuscules, lettres et chiffres seulement
+ * (« tg 2384 », « TG-2384 » → « TG2384 »). null si trop courte pour être discriminante.
+ */
+export function searchIdentifierKey(v: string): string | null {
+  const k = stripAccents(v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return k.length >= 2 ? k : null;
 }
 
 export function cleanText(v: string): string {
@@ -331,6 +340,69 @@ export function redactMemberAuditPayload(
 export const SELF_EDITABLE_CANDIDATES = ['email', 'phone', 'address', 'emergencyContactName', 'emergencyContactPhone'] as const;
 
 // =============================================================================
+// Contrôles de données communs saisie manuelle / import (audit FLT-13)
+// =============================================================================
+
+/** Naissance au plus tôt (une fiche née en 1850 est une erreur de saisie). */
+export const MIN_BIRTH_DATE = '1900-01-01';
+
+// Codes de région Unicode qui ne sont pas des pays (ZZ = inconnu, EU / UN = organisations…)
+const NON_COUNTRY_REGIONS = new Set(['ZZ', 'EU', 'EZ', 'UN', 'QO', 'XA', 'XB']);
+const regionNames = (() => {
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region', fallback: 'none' });
+  } catch {
+    return null;
+  }
+})();
+
+/** Code pays ISO 3166-1 alpha-2 attribué (« XX » refusé). */
+export function isKnownCountry(code: string | null | undefined): boolean {
+  if (!code || !/^[A-Z]{2}$/.test(code) || NON_COUNTRY_REGIONS.has(code)) return false;
+  // Runtime sans données ICU : seul le format est contrôlable
+  if (!regionNames) return true;
+  try {
+    return !!regionNames.of(code);
+  } catch {
+    return false;
+  }
+}
+
+export interface MemberDataInput {
+  birthDate?: string | null;
+  passportExpiry?: string | null;
+  seamanBookExpiry?: string | null;
+  nationality?: string | null;
+  passportCountry?: string | null;
+}
+
+/**
+ * Règles bloquantes partagées par `MemberDataSchema` (création / modification) et l'import Excel :
+ * naissance entre 1900 et aujourd'hui, pays ISO attribués, pièces d'identité expirant après la naissance.
+ * Dates en « AAAA-MM-JJ ».
+ */
+export function memberDataIssues(m: MemberDataInput, today = todayYmd()): { field: keyof MemberDataInput; message: string }[] {
+  const issues: { field: keyof MemberDataInput; message: string }[] = [];
+  if (m.birthDate) {
+    if (m.birthDate < MIN_BIRTH_DATE) issues.push({ field: 'birthDate', message: `Date de naissance antérieure à ${MIN_BIRTH_DATE.slice(0, 4)} : à vérifier` });
+    if (m.birthDate > today) issues.push({ field: 'birthDate', message: 'Date de naissance dans le futur' });
+  }
+  for (const f of ['nationality', 'passportCountry'] as const) {
+    const v = m[f];
+    if (v && !isKnownCountry(v)) issues.push({ field: f, message: `Code pays « ${v} » inconnu (ISO 3166-1 à 2 lettres, ex. TN, FR)` });
+  }
+  if (m.birthDate) {
+    if (m.passportExpiry && m.passportExpiry <= m.birthDate) {
+      issues.push({ field: 'passportExpiry', message: 'Expiration du passeport antérieure à la date de naissance' });
+    }
+    if (m.seamanBookExpiry && m.seamanBookExpiry <= m.birthDate) {
+      issues.push({ field: 'seamanBookExpiry', message: 'Expiration du seaman book antérieure à la date de naissance' });
+    }
+  }
+  return issues;
+}
+
+// =============================================================================
 // Affectations & statut Member (CDC V1 §5.2, CDC §12)
 // =============================================================================
 
@@ -344,6 +416,28 @@ export const CREW_TRANSITIONS: Record<CrewAssignmentStatus, CrewAssignmentStatus
 
 export function canTransitionCrew(from: CrewAssignmentStatus, to: CrewAssignmentStatus): boolean {
   return CREW_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * Personnes à bord d'un navire à une date (audit FLT-02) : embarquement confirmé <= date et
+ * débarquement réel >= date. Un débarquement absent n'est admis que pour ONBOARD : une
+ * affectation COMPLETED sans date de débarquement n'est plus comptée « toujours à bord ».
+ */
+export function onboardAtDateWhere(vesselId: string, date: Date): Prisma.CrewAssignmentWhereInput {
+  return {
+    vesselId,
+    status: { in: ['ONBOARD', 'COMPLETED'] },
+    actualJoinDate: { lte: date },
+    OR: [{ status: 'ONBOARD', actualSignOffDate: null }, { actualSignOffDate: { gte: date } }],
+  };
+}
+
+/**
+ * Audit FLT-24 : un marin encore à bord d'un autre navire ne peut pas être planifié avec un
+ * embarquement prévu déjà passé (l'embarquement serait ensuite refusé).
+ */
+export function planBlockedByOnboardElsewhere(plannedJoinYmd: string | null, today: string, onboardElsewhere: boolean): boolean {
+  return onboardElsewhere && !!plannedJoinYmd && plannedJoinYmd < today;
 }
 
 export interface ActiveAssignments {

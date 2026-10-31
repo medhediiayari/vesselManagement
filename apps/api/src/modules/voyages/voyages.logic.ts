@@ -328,6 +328,27 @@ export function validatePortTimes(t: { eta?: Date | null; etd?: Date | null; ata
   return null;
 }
 
+/** Tolérance sur les dates réelles (fuseaux, saisie à bord en avance d'une veille). */
+export const ACTUAL_TIME_TOLERANCE_MS = 24 * 3_600_000;
+
+/** Une date réelle (ATA / ATD) n'est jamais dans le futur, à 24 h près (audit FLT-06). */
+export function validateActualTimesNotFuture(t: { ata?: Date | null; atd?: Date | null }, now = new Date()): string | null {
+  const limit = now.getTime() + ACTUAL_TIME_TOLERANCE_MS;
+  if (t.atd && t.atd.getTime() > limit) return 'ATD dans le futur : une date réelle se saisit une fois le départ effectif';
+  if (t.ata && t.ata.getTime() > limit) return 'ATA dans le futur : une date réelle se saisit une fois l’arrivée effective';
+  return null;
+}
+
+/**
+ * Cohérence des dates du voyage (audit FLT-06), sur les valeurs fusionnées en PATCH :
+ * départ avant arrivée (prévu et réel). Le contrôle des certificats s'appuie sur ces dates.
+ */
+export function validateVoyageTimes(t: { etd?: Date | null; eta?: Date | null; atd?: Date | null; ata?: Date | null }): string | null {
+  if (t.etd && t.eta && t.etd > t.eta) return 'ETA antérieure à l’ETD : le départ prévu doit précéder l’arrivée prévue';
+  if (t.atd && t.ata && t.atd > t.ata) return 'ATA antérieure à l’ATD : le départ réel doit précéder l’arrivée réelle';
+  return null;
+}
+
 type Dec = string | number | Prisma.Decimal | null | undefined;
 const dec = (v: Dec) => (v === null || v === undefined || v === '' ? null : new Prisma.Decimal(v as Prisma.Decimal.Value));
 
@@ -337,6 +358,19 @@ export function validateCargoQuantities(q: { qtyMinMt?: Dec; qtyMaxMt?: Dec; qty
   for (const v of [min, max, actual]) if (v && v.isNegative()) return 'Les quantités doivent être positives';
   if (min && max && min.greaterThan(max)) return 'Quantité minimale supérieure à la quantité maximale';
   return null;
+}
+
+/**
+ * Avertissements non bloquants (audit FLT-19) : quantité réelle hors de l'intervalle prévu.
+ * L'option (« 10 % MOLOO »…) reste du texte libre : elle est rappelée, jamais interprétée.
+ */
+export function cargoQuantityWarnings(q: { qtyMinMt?: Dec; qtyMaxMt?: Dec; qtyActualMt?: Dec; quantityOption?: string | null }): string[] {
+  const [min, max, actual] = [dec(q.qtyMinMt), dec(q.qtyMaxMt), dec(q.qtyActualMt)];
+  if (!actual) return [];
+  const option = q.quantityOption ? ` (option : ${q.quantityOption})` : '';
+  if (max && actual.greaterThan(max)) return [`Quantité réelle ${actual.toString()} t supérieure au maximum prévu ${max.toString()} t${option} : vérifier la saisie`];
+  if (min && actual.lessThan(min)) return [`Quantité réelle ${actual.toString()} t inférieure au minimum prévu ${min.toString()} t${option} : vérifier la saisie`];
+  return [];
 }
 
 /**
@@ -353,8 +387,45 @@ export function canCompleteTask(p: { voyagesEdit: boolean; noonSubmit: boolean }
 // -----------------------------------------------------------------------------
 
 export const CERTIFICATE_CHECK_DISCLAIMER =
-  'Contrôle informatif : liste les certificats navire dont l’échéance courante tombe avant la fin estimée du voyage. ' +
-  'Ce n’est pas un avis de conformité réglementaire (CDC §7.4).';
+  'Contrôle informatif : liste les certificats du navire et des marins prévus à bord dont l’échéance courante tombe avant la ' +
+  'fin estimée du voyage. Ce n’est pas un avis de conformité réglementaire (CDC §7.4).';
+
+/** Début estimé du voyage : départ réel / estimé, première date d'escale, sinon début de laycan. */
+export function voyageStartDate(
+  v: { atd: Date | null; etd: Date | null; laycanFrom: Date | null },
+  ports: { eta: Date | null; etd: Date | null; ata: Date | null; atd: Date | null }[],
+): Date | null {
+  if (v.atd) return v.atd;
+  if (v.etd) return v.etd;
+  const portDates = ports.flatMap((p) => [p.ata, p.eta, p.atd, p.etd]).filter((d): d is Date => !!d);
+  if (portDates.length) return new Date(Math.min(...portDates.map((d) => d.getTime())));
+  return v.laycanFrom;
+}
+
+/**
+ * Le marin est-il à bord pendant (une partie) du voyage ? Embarquement réel sinon prévu ; débarquement réel, sinon prévu
+ * tant que l'affectation est ouverte. Une affectation terminée sans date de débarquement ne compte pas (même règle que
+ * l'équipage à une date, audit FLT-02). Bornes inconnues = période ouverte.
+ */
+export function assignmentCoversVoyage(
+  a: {
+    status: 'PLANNED' | 'ONBOARD' | 'COMPLETED' | 'CANCELLED';
+    plannedJoinDate: Date | null;
+    actualJoinDate: Date | null;
+    plannedSignOffDate: Date | null;
+    actualSignOffDate: Date | null;
+  },
+  start: Date | null,
+  end: Date | null,
+): boolean {
+  if (a.status === 'CANCELLED') return false;
+  if (a.status === 'COMPLETED' && !a.actualSignOffDate) return false;
+  const join = a.actualJoinDate ?? a.plannedJoinDate;
+  const leave = a.status === 'COMPLETED' ? a.actualSignOffDate : a.actualSignOffDate ?? a.plannedSignOffDate;
+  if (end && join && join > end) return false;
+  if (start && leave && leave < startOfUtcDay(start)) return false;
+  return true;
+}
 
 /** Fin estimée du voyage : arrivée réelle / estimée, dernière date d'escale, sinon fin de laycan. */
 export function voyageEndDate(
@@ -420,6 +491,20 @@ export function sortTimeline(events: (TimelineEvent | null | undefined)[]): Time
 /** Champs de planning repris dans le détail d'un événement « planning mis à jour ». */
 export const TIMELINE_SCHEDULE_FIELDS = ['etd', 'eta', 'atd', 'ata', 'laycanFrom', 'laycanTo'] as const;
 
+/** Libellés de la chronologie (audit FLT-15 : « LAYCANFROM » était affiché). */
+export const SCHEDULE_FIELD_LABELS: Record<string, string> = {
+  etd: 'ETD',
+  eta: 'ETA',
+  atd: 'ATD',
+  ata: 'ATA',
+  laycanFrom: 'début de laycan',
+  laycanTo: 'fin de laycan',
+};
+
+export function scheduleChangeLabel(fields: string[]): string {
+  return `Planning mis à jour (${fields.map((f) => SCHEDULE_FIELD_LABELS[f] ?? f).join(', ')})`;
+}
+
 export function pickScheduleDetails(after: unknown): Record<string, unknown> | undefined {
   if (!after || typeof after !== 'object') return undefined;
   const out: Record<string, unknown> = {};
@@ -441,6 +526,18 @@ export function stripCharterPartyReferences(events: TimelineEvent[]): TimelineEv
       const details = Object.fromEntries(Object.entries(e.details).filter(([k]) => !CP_DETAIL_KEYS.includes(k)));
       return { ...e, details: Object.keys(details).length ? details : undefined };
     });
+}
+
+/**
+ * Référence de Charter Party (audit FLT-16) : stockée en majuscules, espaces normalisés ;
+ * l'unicité se juge sans casse ni espaces (« audit-cp-001 » = « AUDIT-CP-001 »).
+ */
+export function normalizeCpReference(s: string): string {
+  return s.trim().replace(/\s+/g, ' ').toUpperCase();
+}
+
+export function cpReferenceKey(s: string): string {
+  return s.toUpperCase().replace(/\s+/g, '');
 }
 
 /** Libellés FR des actions d'audit de l'entité voyage reprises dans la timeline. */

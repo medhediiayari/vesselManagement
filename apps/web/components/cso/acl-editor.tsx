@@ -73,7 +73,9 @@ export function AclEditorDialog({
     (inherit !== acl.data.inheritAcl ||
       JSON.stringify(entries.map((e) => [e.principalType, e.principalId, e.effect, [...e.actions].sort()])) !==
         JSON.stringify(acl.data.entries.map((e) => [e.principalType, e.principalId, e.effect, [...e.actions].sort()])));
-  const invalid = entries.some((e) => e.actions.length === 0);
+  // Rupture d'héritage sans « Autoriser · Consulter » : refusée par l'API (CSO-02)
+  const breakWithoutView = !inherit && !entries.some((e) => e.effect === 'ALLOW' && e.actions.includes('view'));
+  const invalid = entries.some((e) => e.actions.length === 0) || breakWithoutView;
 
   function update(i: number, patch: Partial<AclEntry>) {
     setEntries((prev) => prev.map((e, j) => (j === i ? { ...e, ...patch } : e)));
@@ -111,11 +113,17 @@ export function AclEditorDialog({
 
             <Checkbox
               label={kind === 'folder' ? 'Hériter des droits du dossier parent' : 'Hériter des droits du dossier'}
-              description="Décocher pour rompre l'héritage : seules les règles ci-dessous s'appliqueront."
+              description={`Décocher pour rompre l'héritage : les règles des dossiers parents ne s'appliquent plus. Une action non citée ci-dessous reste ouverte aux titulaires de la permission du module ; une règle « Autoriser · ${CSO_ACTION_LABELS.view} » est donc exigée.`}
               checked={inherit}
               disabled={!canEdit}
               onChange={(e) => setInherit(e.target.checked)}
             />
+            {canEdit && breakWithoutView && (
+              <Notice tone="warn">
+                Héritage rompu : ajoutez au moins une règle <strong>Autoriser</strong> cochant « {CSO_ACTION_LABELS.view} » pour désigner qui peut voir cet
+                élément.
+              </Notice>
+            )}
 
             <section aria-labelledby="acl-own">
               <h3 id="acl-own" className="mb-2 text-sm font-semibold">

@@ -36,6 +36,13 @@ export class CertificateTypesController {
     return this.types.createType(ctx, dto);
   }
 
+  /** Validateurs proposés : personnes désignées ayant réellement le droit d'approuver (sélecteur). */
+  @Post('validators/check')
+  @RequirePermissions('certificates.types.manage')
+  checkValidators(@Body() dto: SetPrincipalsDto) {
+    return this.types.checkValidators(dto.principals);
+  }
+
   @Patch(':id')
   @RequirePermissions('certificates.types.manage')
   update(@Auth() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateCertificateTypeDto) {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, CalendarClock, FileText, Info, X } from 'lucide-react';
+import { AlertTriangle, CalendarClock, FileText, Info, ShieldCheck, Users, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { ApiError, api, errorMessage, type StoredFileDto } from '@/lib/api';
@@ -11,22 +11,25 @@ import { FileUploader } from '@/components/amc/file-uploader';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Checkbox, Field, Input, Select, Textarea, TextField } from '@/components/ui/field';
-import { announceWorkflow, certKeys, conflictMessage, toDateInput } from './lib';
+import { announceWorkflow, certKeys, conflictMessage, selfApproves, toDateInput } from './lib';
 import { MemberPicker, type PickOption } from './pickers';
+import { FolderSelect, useCertificateFolders } from './tree';
 import {
   EXPIRY_KIND_LABELS,
   SUBJECT_KIND_LABELS,
+  type ApproversDto,
   type CertificateData,
   type CertificateDetail,
   type CertificateTypeDto,
   type ExpiryKind,
   type RequestDto,
+  type RequestKind,
   type SubjectKind,
   type WorkflowResult,
 } from './types';
 
 export type CertificateFormMode =
-  | { mode: 'create'; defaults?: { subjectKind?: SubjectKind; vesselId?: string | null; typeId?: string | null } }
+  | { mode: 'create'; defaults?: { subjectKind?: SubjectKind; vesselId?: string | null; typeId?: string | null; folderId?: string | null } }
   | { mode: 'renew'; certificate: CertificateDetail }
   | { mode: 'correct'; certificate: CertificateDetail }
   | { mode: 'edit'; certificate: CertificateDetail; request: RequestDto };
@@ -48,6 +51,7 @@ interface FormState {
   remarks: string;
   changeNote: string;
   submit: boolean;
+  folderId: string;
 }
 
 function fromData(d: Partial<CertificateData> | null | undefined): Partial<FormState> {
@@ -84,6 +88,7 @@ function initialState(props: CertificateFormMode, defaultVessel: string, canSubm
     remarks: '',
     changeNote: '',
     submit: canSubmit,
+    folderId: '',
   };
   if (props.mode === 'create') {
     return {
@@ -91,6 +96,7 @@ function initialState(props: CertificateFormMode, defaultVessel: string, canSubm
       subjectKind: props.defaults?.subjectKind ?? 'VESSEL',
       vesselId: props.defaults?.vesselId ?? defaultVessel,
       typeId: props.defaults?.typeId ?? '',
+      folderId: props.defaults?.folderId ?? '',
     };
   }
   if (props.mode === 'renew') {
@@ -139,7 +145,12 @@ export function CertificateFormDialog({
   onDone: (res: WorkflowResult) => void | Promise<void>;
 }) {
   const { me, can, currentVessel } = useSession();
-  const canSubmit = can('certificates.submit');
+  // Publication directe : self_approve (toute demande) ou renewal.self_approve (renouvellement)
+  const kind: RequestKind =
+    props.mode === 'create' ? 'CREATE' : props.mode === 'renew' ? 'RENEWAL' : props.mode === 'correct' ? 'CORRECTION' : props.request.kind;
+  const selfApprove = selfApproves(can, kind);
+  const canSubmit = can('certificates.submit') || selfApprove;
+  const canFile = can('certificates.folders.manage');
   const canMemberCerts = can('members.certificates.view');
   const defaultVessel = currentVessel?.id ?? (me.accessibleVessels.length === 1 ? me.accessibleVessels[0].id : '');
   const [s, setS] = useState<FormState>(() => initialState(props, defaultVessel, canSubmit));
@@ -148,7 +159,7 @@ export function CertificateFormDialog({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<{ message: string; certificateId?: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const ids = { subject: useId(), vessel: useId(), type: useId(), expiry: useId(), remarks: useId(), note: useId() };
+  const ids = { subject: useId(), vessel: useId(), type: useId(), expiry: useId(), remarks: useId(), note: useId(), folder: useId() };
 
   // Ré-initialisation à chaque ouverture (nouvelle version de la demande, autre certificat…)
   const resetKey = props.mode === 'edit' ? `${props.request.id}:${props.request.version}` : props.mode === 'create' ? 'create' : props.certificate.id;
@@ -186,6 +197,15 @@ export function CertificateFormDialog({
     staleTime: 60_000,
   });
   const selectedType = useMemo(() => types.data?.find((t) => t.id === s.typeId) ?? null, [types.data, s.typeId]);
+  const folders = useCertificateFolders(open && isCreate && canFile);
+  // Qui recevra la demande d'approbation (renouvellement / correction d'un certificat existant)
+  const approvers = useQuery({
+    queryKey: [...certKeys.detail(certificate?.id ?? ''), 'approvers', props.mode],
+    queryFn: () =>
+      api.get<ApproversDto>(`/certificates/${certificate!.id}/approvers`, { query: { kind: props.mode === 'correct' ? 'CORRECTION' : 'RENEWAL' } }),
+    enabled: open && !!certificate && (props.mode === 'renew' || props.mode === 'correct'),
+    staleTime: 30_000,
+  });
   const typeInfo = certificate?.type ?? selectedType;
   const defaultMonths = certificate?.type.defaultValidityMonths ?? selectedType?.defaultValidityMonths ?? null;
   const anchor = s.validFrom || s.issuedOn;
@@ -210,11 +230,17 @@ export function CertificateFormDialog({
           : `Modifier la demande (version ${props.request.version})`;
   const description =
     props.mode === 'create'
-      ? 'Le certificat devient officiel après approbation par un validateur éligible (jamais le demandeur).'
+      ? selfApprove
+        ? 'Publication directe : le certificat devient officiel dès l’enregistrement, sans circuit d’approbation (sauf brouillon).'
+        : 'Le certificat devient officiel après approbation par un validateur éligible (jamais le demandeur).'
       : props.mode === 'renew'
-        ? "L'ancien certificat reste courant (dates, document officiel et alertes) jusqu'à l'approbation du nouveau."
+        ? selfApprove
+          ? 'Publication directe : le nouveau certificat devient courant dès l’enregistrement, sans circuit d’approbation.'
+          : "L'ancien certificat reste courant (dates, document officiel et alertes) jusqu'à l'approbation du nouveau."
         : props.mode === 'correct'
-          ? 'La correction est une demande à valider : la révision courante reste en vigueur jusqu’à son approbation.'
+          ? selfApprove
+            ? 'Publication directe : la révision corrigée remplace la révision courante dès l’enregistrement (sauf brouillon).'
+            : 'La correction est une demande à valider : la révision courante reste en vigueur jusqu’à son approbation.'
           : 'Chaque modification crée une nouvelle version immuable ; une demande en attente redevient à valider et les validateurs sont notifiés.';
 
   function localValidate(): Record<string, string> {
@@ -263,8 +289,9 @@ export function CertificateFormDialog({
           fileId: file?.id ?? null,
           changeNote,
           submit: canSubmit && s.submit,
+          ...(canFile && s.folderId ? { folderId: s.folderId } : {}),
         });
-        announceWorkflow(res, canSubmit && s.submit ? 'Certificat créé et soumis à approbation' : 'Certificat créé (brouillon)');
+        announceWorkflow(res, canSubmit && s.submit ? (res.autoApproved ? 'Certificat créé et publié' : 'Certificat créé et soumis à approbation') : 'Certificat créé (brouillon)');
       } else if (props.mode === 'renew') {
         res = await api.post<WorkflowResult>(`/certificates/${props.certificate.id}/renew`, {
           ...data,
@@ -272,7 +299,10 @@ export function CertificateFormDialog({
           changeNote,
           submit: canSubmit && s.submit,
         });
-        announceWorkflow(res, canSubmit && s.submit ? 'Renouvellement soumis à approbation' : 'Renouvellement enregistré en brouillon');
+        announceWorkflow(
+          res,
+          canSubmit && s.submit ? (res.autoApproved ? 'Certificat renouvelé (publié sans approbation)' : 'Renouvellement soumis à approbation') : 'Renouvellement enregistré en brouillon',
+        );
       } else if (props.mode === 'correct') {
         res = await api.post<WorkflowResult>(`/certificates/${props.certificate.id}/corrections`, {
           ...data,
@@ -280,7 +310,7 @@ export function CertificateFormDialog({
           changeNote: s.changeNote.trim(),
           submit: canSubmit && s.submit,
         });
-        announceWorkflow(res, canSubmit && s.submit ? 'Correction soumise à approbation' : 'Correction enregistrée en brouillon');
+        announceWorkflow(res, canSubmit && s.submit ? (res.autoApproved ? 'Correction publiée' : 'Correction soumise à approbation') : 'Correction enregistrée en brouillon');
       } else {
         res = await api.patch<WorkflowResult>(`/certificate-requests/${props.request.id}`, {
           expectedVersion: props.request.version,
@@ -307,7 +337,15 @@ export function CertificateFormDialog({
   }
 
   const submitLabel =
-    props.mode === 'edit' ? 'Enregistrer la nouvelle version' : canSubmit && s.submit ? 'Enregistrer et soumettre' : 'Enregistrer le brouillon';
+    props.mode === 'edit'
+      ? 'Enregistrer la nouvelle version'
+      : canSubmit && s.submit
+        ? selfApprove
+          ? props.mode === 'renew'
+            ? 'Renouveler et publier'
+            : 'Enregistrer et publier'
+          : 'Enregistrer et soumettre'
+        : 'Enregistrer le brouillon';
 
   return (
     <Dialog
@@ -430,6 +468,11 @@ export function CertificateFormDialog({
                   ))}
                 </Select>
               </Field>
+              {canFile && (folders.data?.length ?? 0) > 0 && (
+                <Field label="Dossier de l’arborescence" htmlFor={ids.folder} hint="Classement facultatif, sans effet sur les droits.">
+                  <FolderSelect id={ids.folder} value={s.folderId} onChange={(v) => set('folderId', v)} folders={folders.data ?? []} />
+                </Field>
+              )}
             </div>
             {selectedType && (
               <p className="flex items-start gap-1.5 text-xs text-ink-muted">
@@ -524,9 +567,11 @@ export function CertificateFormDialog({
         <Section
           title="Document"
           description={
-            !typeInfo || typeInfo.requiresDocument
-              ? "Facultatif à ce stade : sans pièce, le certificat restera signalé « Document manquant » après approbation."
-              : 'Facultatif pour ce type de certificat.'
+            props.mode === 'correct' && props.certificate.currentRevision?.officialAttachment
+              ? 'Sans nouvelle pièce, le document officiel actuel est conservé pour la révision corrigée.'
+              : !typeInfo || typeInfo.requiresDocument
+                ? "Facultatif à ce stade : sans pièce, le certificat restera signalé « Document manquant » après approbation."
+                : 'Facultatif pour ce type de certificat.'
           }
         >
           {currentVersionFile && !file && (
@@ -568,12 +613,24 @@ export function CertificateFormDialog({
               {errors.fileId}
             </p>
           )}
-          <p className="text-xs text-ink-muted">La pièce reste « en attente » et n’est jamais officielle avant l’approbation de la demande.</p>
+          <p className="text-xs text-ink-muted">
+            {selfApprove && props.mode !== 'edit'
+              ? 'Publiée directement, la pièce devient le document officiel dès l’enregistrement.'
+              : 'La pièce reste « en attente » et n’est jamais officielle avant l’approbation de la demande.'}
+          </p>
         </Section>
 
         <Section title="Validation">
           <Field
-            label={props.mode === 'correct' ? 'Motif de la correction' : props.mode === 'edit' ? 'Note de modification' : 'Note pour les validateurs'}
+            label={
+              props.mode === 'correct'
+                ? 'Motif de la correction'
+                : props.mode === 'edit'
+                  ? 'Note de modification'
+                  : selfApprove
+                    ? 'Note pour l’historique'
+                    : 'Note pour les validateurs'
+            }
             required={props.mode === 'correct'}
             htmlFor={ids.note}
             error={errors.changeNote}
@@ -583,18 +640,59 @@ export function CertificateFormDialog({
           </Field>
           {props.mode !== 'edit' &&
             (canSubmit ? (
-              <Checkbox
-                label="Soumettre immédiatement à approbation"
-                description="Tous les validateurs éligibles sont notifiés. Sinon, la demande reste en brouillon, visible de vous seul."
-                checked={s.submit}
-                onChange={(e) => set('submit', e.target.checked)}
-              />
+              selfApprove ? (
+                <Checkbox
+                  label="Publier immédiatement (sans approbation)"
+                  description="Votre profil publie directement : la décision est tracée à votre nom dans l’historique. Sinon, la demande reste en brouillon."
+                  checked={s.submit}
+                  onChange={(e) => set('submit', e.target.checked)}
+                />
+              ) : (
+                <Checkbox
+                  label="Soumettre immédiatement à approbation"
+                  description="Tous les validateurs éligibles sont notifiés. Sinon, la demande reste en brouillon, visible de vous seul."
+                  checked={s.submit}
+                  onChange={(e) => set('submit', e.target.checked)}
+                />
+              )
             ) : (
               <p className="text-xs text-ink-muted">Vous n’avez pas le droit de soumettre : la demande sera enregistrée en brouillon.</p>
             ))}
+          {(props.mode === 'renew' || props.mode === 'correct') && <ApproversHint data={approvers.data} loading={approvers.isLoading} />}
         </Section>
         <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
       </form>
     </Dialog>
+  );
+}
+
+/** Destinataires de la demande d'approbation (même règle que la notification serveur). */
+function ApproversHint({ data, loading }: { data?: ApproversDto; loading: boolean }) {
+  if (loading) return <p className="text-xs text-ink-soft">Recherche des validateurs…</p>;
+  if (!data) return null;
+  if (data.selfApprove) {
+    return (
+      <p className="flex items-start gap-1.5 rounded-md bg-teal-50 px-3 py-2 text-xs text-teal-700">
+        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span>Aucune approbation requise : vous publiez directement.</span>
+      </p>
+    );
+  }
+  const names = data.approvers.map((a) => a.displayName);
+  return (
+    <div className={cn('flex items-start gap-1.5 rounded-md px-3 py-2 text-xs', names.length ? 'bg-canvas text-ink-muted' : 'bg-warn-bg text-warn')}>
+      <Users className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+      {names.length ? (
+        <p>
+          <span className="font-medium text-ink">Demande d’approbation envoyée à :</span> {names.slice(0, 6).join(', ')}
+          {names.length > 6 ? ` et ${names.length - 6} autre(s)` : ''}.{' '}
+          {data.validatorsConfigured
+            ? 'Validateurs désignés pour ce type, ayant le droit d’approuver et accès au certificat.'
+            : 'Utilisateurs ayant le droit « Approuver les certificats » et accès au certificat (aucun validateur désigné pour ce type).'}
+        </p>
+      ) : (
+        <p>Aucun validateur éligible : la demande resterait en attente. Désignez des validateurs dans Configuration → types de certificat.</p>
+      )}
+    </div>
   );
 }

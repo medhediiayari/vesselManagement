@@ -25,7 +25,7 @@ const FLAG: Record<string, { label: string; tone: 'danger' | 'warn' | 'neutral';
   EXPIRY_UNKNOWN: { label: 'Échéance inconnue', tone: 'neutral', icon: HelpCircle },
 };
 
-/** Contrôle INFORMATIF des certificats navire (CDC §7.4) — jamais un avis de conformité. */
+/** Contrôle INFORMATIF des certificats du navire et de l'équipage (CDC §7.4) — jamais un avis de conformité. */
 function CertificateCheckPanel({ voyageId, vesselId }: { voyageId: string; vesselId: string }) {
   const q = useQuery({
     queryKey: voyageKeys.sub(voyageId, 'certificate-check'),
@@ -81,13 +81,71 @@ function CertificateCheckPanel({ voyageId, vesselId }: { voyageId: string; vesse
                   })}
                 </ul>
               ) : (
-                <p className="text-sm text-ink-muted">Aucun certificat signalé pour la période du voyage.</p>
+                <p className="text-sm text-ink-muted">Aucun certificat navire signalé pour la période du voyage.</p>
               )}
+              {q.data.crew && <CrewCertificateCheck crew={q.data.crew} />}
             </>
           )}
         </div>
       )}
     </Panel>
+  );
+}
+
+/** Volet équipage : marins à bord pendant le voyage dont un certificat pose problème (jamais « document manquant »). */
+function CrewCertificateCheck({ crew }: { crew: NonNullable<CertificateCheck['crew']> }) {
+  return (
+    <section aria-labelledby="crew-cert-title" className="space-y-2 border-t border-line pt-3">
+      <h3 id="crew-cert-title" className="text-sm font-semibold">
+        Équipage
+      </h3>
+      {!crew.available ? (
+        <p className="text-sm text-ink-muted">{crew.reason}</p>
+      ) : crew.checkedMembers === 0 ? (
+        <p className="text-sm text-ink-muted">Aucun marin à bord ni prévu sur ce navire pendant la période du voyage.</p>
+      ) : (
+        <>
+          <p className="text-sm text-ink-muted">
+            {crew.checkedMembers} marin(s) à bord ou prévu(s) pendant le voyage
+            {crew.voyageStart ? ` (départ estimé le ${fmtDate(crew.voyageStart)})` : ''}.
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Expirés" value={crew.counts.expired} tone={crew.counts.expired ? 'danger' : undefined} />
+            <Stat label="Expirent avant la fin" value={crew.counts.expiringBeforeVoyageEnd} tone={crew.counts.expiringBeforeVoyageEnd ? 'warn' : undefined} />
+            <Stat label="Échéance inconnue" value={crew.counts.expiryUnknown} />
+          </div>
+          {crew.members.length ? (
+            <ul className="divide-y divide-line rounded-md border border-line">
+              {crew.members.map((m) => (
+                <li key={m.memberId} className="space-y-1.5 px-3 py-2 text-sm">
+                  <Link href={`/members/${m.memberId}?tab=certificates`} className="font-medium text-action hover:underline">
+                    {m.name}
+                  </Link>
+                  <span className="text-xs text-ink-muted"> · {m.rank}</span>
+                  <ul className="space-y-1">
+                    {m.items.map((c) => {
+                      const f = FLAG[c.flag];
+                      const Icon = f.icon;
+                      return (
+                        <li key={c.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                          <Badge tone={f.tone} icon={<Icon className="h-3.5 w-3.5" aria-hidden />}>
+                            {f.label}
+                          </Badge>
+                          <span className="text-ink">{c.type.name}</span>
+                          {c.currentExpiryOn && <span className="tabular text-ink-muted">échéance {fmtDate(c.currentExpiryOn)}</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-ink-muted">Aucun certificat de marin signalé pour la période du voyage.</p>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 

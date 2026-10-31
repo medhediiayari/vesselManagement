@@ -61,7 +61,8 @@ export function InvoiceFormDialog({ open, onOpenChange, initialSupplierId, initi
   const multi = chosen.length > 1;
   const imputedSum = dec.add(...chosen.map((p) => toApiDecimal(imputed[p.id] || '0')));
   const errors = {
-    amount: decimalError(h.amount, { required: true, scale: 2 }),
+    amount: decimalError(h.amount, { required: true, positive: true, scale: 2 }),
+    dueDate: h.dueDate && h.invoiceDate && h.dueDate < h.invoiceDate ? 'L’échéance ne peut pas précéder la date de la facture' : null,
     tax: decimalError(h.taxAmount, { scale: 2 }),
     imputed: multi
       ? chosen.some((p) => decimalError(imputed[p.id] ?? '', { required: true, scale: 2 }))
@@ -72,7 +73,7 @@ export function InvoiceFormDialog({ open, onOpenChange, initialSupplierId, initi
       : null,
   };
   const currencyMismatch = chosen.some((p) => h.currency && p.currency !== h.currency);
-  const valid = !!supplierId && chosen.length > 0 && h.number.trim() && h.invoiceDate && /^[A-Z]{3}$/.test(h.currency) && !errors.amount && !errors.tax && !errors.imputed;
+  const valid = !!supplierId && chosen.length > 0 && h.number.trim() && h.invoiceDate && /^[A-Z]{3}$/.test(h.currency) && !errors.amount && !errors.tax && !errors.imputed && !errors.dueDate;
 
   const submit = async () => {
     setBusy(true);
@@ -181,8 +182,8 @@ export function InvoiceFormDialog({ open, onOpenChange, initialSupplierId, initi
           <FormField label="Date de facture" required>
             <Input type="date" value={h.invoiceDate} onChange={(e) => setH((x) => ({ ...x, invoiceDate: e.target.value }))} />
           </FormField>
-          <FormField label="Échéance">
-            <Input type="date" value={h.dueDate} onChange={(e) => setH((x) => ({ ...x, dueDate: e.target.value }))} />
+          <FormField label="Échéance" error={errors.dueDate ?? undefined}>
+            <Input type="date" value={h.dueDate} min={h.invoiceDate || undefined} onChange={(e) => setH((x) => ({ ...x, dueDate: e.target.value }))} invalid={!!errors.dueDate} />
           </FormField>
           <FormField label="Devise" required hint={currencyMismatch ? 'Différente de la devise d’un BC : le rapprochement le signalera.' : undefined}>
             <CurrencyInput value={h.currency} onChange={(v) => setH((x) => ({ ...x, currency: v }))} />

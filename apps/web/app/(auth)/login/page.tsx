@@ -8,6 +8,17 @@ import { ApiError, api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { TextField } from '@/components/ui/field';
 
+/** Cible interne uniquement : `/\site.tld` ou `//site.tld` sont résolus puis rejetés (ADM-02). */
+function safeNext(next: string | null): string {
+  if (!next) return '/';
+  try {
+    const url = new URL(next, window.location.origin);
+    return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : '/';
+  } catch {
+    return '/';
+  }
+}
+
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
@@ -15,21 +26,18 @@ function LoginForm() {
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    setLocked(false);
     try {
       const res = await api.post<{ mustChangePassword: boolean }>('/auth/login', { identifier, password });
       qc.clear();
-      const next = params.get('next');
-      router.replace(res.mustChangePassword ? '/change-password' : next && next.startsWith('/') && !next.startsWith('//') ? next : '/');
+      const next = safeNext(params.get('next'));
+      router.replace(res.mustChangePassword ? '/change-password' : next);
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'ACCOUNT_LOCKED') setLocked(true);
       setError(err instanceof ApiError ? err.message : 'Connexion impossible');
     } finally {
       setBusy(false);
@@ -60,11 +68,6 @@ function LoginForm() {
         {error && (
           <div role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger">
             {error}
-            {locked && (
-              <p className="mt-1 text-xs">
-                Par sécurité, seul un administrateur peut déverrouiller le compte ; il vous remettra un mot de passe temporaire.
-              </p>
-            )}
           </div>
         )}
         <Button type="submit" className="w-full" loading={busy} disabled={!identifier || !password}>

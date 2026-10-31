@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthContext, can, vesselWhere } from '../access/auth-context';
+import { InvoicesService } from './invoices.service';
 import { PurchasingCore } from './purchasing-core.service';
 
 /**
@@ -14,6 +15,7 @@ export class PurchasingBoardService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly core: PurchasingCore,
+    private readonly invoices: InvoicesService,
   ) {}
 
   async board(ctx: AuthContext, vesselId?: string) {
@@ -36,7 +38,7 @@ export class PurchasingBoardService {
       out.purchaseRequests = { inbox: submitted, underReview, counterPrPending: revised, onHold, toOrder, overdueNotOrdered: overdue };
     }
     if (can(ctx, 'rfq.view')) {
-      const rfq = (where: Prisma.RfqWhereInput) => this.prisma.rfq.count({ where: { AND: [scope as Prisma.RfqWhereInput, where] } });
+      const rfq = (where: Prisma.RfqWhereInput) => this.prisma.rfq.count({ where: { AND: [scope as Prisma.RfqWhereInput, this.core.rfqOwnWhere(ctx), where] } });
       const [drafts, sendFailed, deadlinePassed] = await Promise.all([
         rfq({ status: 'DRAFT' }),
         rfq({ status: { in: ['DRAFT', 'ISSUED', 'QUOTED'] }, suppliers: { some: { status: 'SEND_FAILED' } } }),
@@ -45,7 +47,7 @@ export class PurchasingBoardService {
       out.rfqs = { drafts, sendFailed, toFollowUp: deadlinePassed };
     }
     if (can(ctx, 'quotation.view')) {
-      out.quotations = { toCompare: await this.prisma.rfq.count({ where: { AND: [scope as Prisma.RfqWhereInput, { status: 'QUOTED' }] } }) };
+      out.quotations = { toCompare: await this.prisma.rfq.count({ where: { AND: [scope as Prisma.RfqWhereInput, this.core.rfqOwnWhere(ctx), { status: 'QUOTED' }] } }) };
     }
     if (can(ctx, 'bc.view')) {
       const po = (where: Prisma.PurchaseOrderWhereInput) =>
@@ -66,13 +68,21 @@ export class PurchasingBoardService {
     if (can(ctx, 'receiving.view') || can(ctx, 'variances.manage')) {
       out.variances = {
         open: await this.prisma.variance.count({ where: { status: { in: ['OPEN', 'IN_PROGRESS'] }, po: { AND: [scope as Prisma.PurchaseOrderWhereInput, this.core.poOwnWhere(ctx)] } } }),
-        receiptsToValidate: await this.prisma.goodsReceipt.count({ where: { AND: [scope as Prisma.GoodsReceiptWhereInput, { status: 'CONFIRMED' }] } }),
+        receiptsToValidate: await this.prisma.goodsReceipt.count({
+          where: { AND: [scope as Prisma.GoodsReceiptWhereInput, this.core.ownPrOnly(ctx) ? { po: this.core.poOwnWhere(ctx) } : {}, { status: 'CONFIRMED' }] },
+        }),
       };
     }
     if (can(ctx, 'invoice.view')) {
-      const inv = (where: Prisma.InvoiceWhereInput) => this.prisma.invoice.count({ where: { AND: [scope as Prisma.InvoiceWhereInput, where] } });
-      const [toReview, disputed] = await Promise.all([inv({ status: { in: ['RECEIVED', 'UNDER_REVIEW'] } }), inv({ status: 'DISPUTED' })]);
-      out.invoices = { toReview, disputed };
+      const invScope: Prisma.InvoiceWhereInput = { AND: [scope as Prisma.InvoiceWhereInput, this.core.invoiceOwnWhere(ctx)] };
+      const inv = (where: Prisma.InvoiceWhereInput) => this.prisma.invoice.count({ where: { AND: [invScope, where] } });
+      const [toReview, disputed, gaps] = await Promise.all([
+        inv({ status: { in: ['RECEIVED', 'UNDER_REVIEW'] } }),
+        inv({ status: 'DISPUTED' }),
+        this.invoices.countReconciliationGaps(invScope),
+      ]);
+      // Écarts de rapprochement : factures à examiner dont le rapprochement est en écart (statut inchangé, ACH-13)
+      out.invoices = { toReview, disputed, reconciliationGaps: gaps.count, reconciliationGapsCapped: gaps.capped };
     }
     return out;
   }

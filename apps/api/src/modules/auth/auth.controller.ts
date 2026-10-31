@@ -16,6 +16,7 @@ import {
   UpdateProfileDto,
 } from './auth.dto';
 import { AuthService } from './auth.service';
+import { PasswordService } from './password.service';
 
 function cookieBase() {
   return { secure: env().COOKIE_SECURE, sameSite: 'lax' as const, path: '/' };
@@ -28,7 +29,15 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly passwords: PasswordService,
   ) {}
+
+  /** GET /auth/password-policy — règles à afficher avant saisie (public : page de réinitialisation, ADM-21). */
+  @Public()
+  @Get('password-policy')
+  passwordPolicy() {
+    return this.passwords.policy();
+  }
 
   /** POST /auth/login — throttling IP en complément du verrouillage compte (CDC §12.3). */
   @Public()

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Auth } from '../../common/decorators';
 import { Errors } from '../../common/errors';
 import { PaginationSchema, cursorArgs, toPage } from '../../common/pagination';
+import { escapeLike } from '../../common/utils/like';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthContext, can } from '../access/auth-context';
 
@@ -81,7 +82,7 @@ export class AuditController {
         q.entityId ? { entityId: q.entityId } : {},
         q.vesselId ? { vesselId: q.vesselId } : {},
         q.actorId ? { actorId: q.actorId } : {},
-        q.action ? { action: { startsWith: q.action } } : {},
+        q.action ? { action: { startsWith: escapeLike(q.action) } } : {}, // jokers échappés (ADM-22)
         q.result ? { result: q.result } : {},
         q.from || q.to ? { occurredAt: { gte: q.from, lte: q.to } } : {},
       ],

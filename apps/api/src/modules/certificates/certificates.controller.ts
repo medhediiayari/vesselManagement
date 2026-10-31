@@ -12,6 +12,7 @@ import { CertificateWorkflowService } from './certificate-workflow.service';
 import {
   AddAttachmentDto,
   AddCommentDto,
+  ApproversQuery,
   ArchiveCertificateDto,
   CancelRequestDto,
   ComplianceQuery,
@@ -150,6 +151,13 @@ export class CertificatesController {
     return respondLink(await this.documents.attachmentLink(ctx, id, attachmentId, 'download'), q, res);
   }
 
+  /** Qui recevra la demande d'approbation (ou publication directe) si l'appelant la soumet. */
+  @Get(':id/approvers')
+  @RequireAnyPermission('certificates.create', 'certificates.edit', 'certificates.submit')
+  approvers(@Auth() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Query() q: ApproversQuery) {
+    return this.workflow.approvers(ctx, id, q.kind);
+  }
+
   /** Responsables de renouvellement éligibles (droit réel de lecture du certificat). */
   @Get(':id/renewal-owners')
   @RequirePermissions('certificates.renewal.manage')
@@ -200,8 +208,9 @@ export class CertificateRequestsController {
     return this.workflow.updateRequest(ctx, requestId, dto);
   }
 
+  /** Soumission : certificates.submit, ou publication directe (self_approve) — revérifié par type de demande. */
   @Post(':requestId/submit')
-  @RequirePermissions('certificates.submit')
+  @RequireAnyPermission('certificates.submit', 'certificates.self_approve', 'certificates.renewal.self_approve')
   submit(@Auth() ctx: AuthContext, @Param('requestId', ParseUUIDPipe) requestId: string, @Body() dto: SubmitRequestDto) {
     return this.workflow.submit(ctx, requestId, dto);
   }

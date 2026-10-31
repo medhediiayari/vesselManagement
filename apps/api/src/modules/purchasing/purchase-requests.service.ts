@@ -27,6 +27,7 @@ import { PurchasingConfigService } from './purchasing-config.service';
 import { PurchasingCore } from './purchasing-core.service';
 import { PurchasingDocuments } from './purchasing-documents.service';
 import { LINKS } from './purchasing.constants';
+import { escapeLike } from '../../common/utils/like';
 import {
   AppliedReviewCircuit,
   AppliedReviewStep,
@@ -35,6 +36,7 @@ import {
   PR_HOLDABLE_STATUSES,
   PR_OPEN_STATUSES,
   PR_SPLITTABLE_STATUSES,
+  PR_TERMINAL_STATUSES,
   PR_TRANSITIONS,
   assertTransition,
   fmtQty,
@@ -93,10 +95,10 @@ export class PurchaseRequestsService {
     if (q.search) {
       and.push({
         OR: [
-          { number: { contains: q.search, mode: 'insensitive' } },
-          { subject: { contains: q.search, mode: 'insensitive' } },
-          { lines: { some: { designation: { contains: q.search, mode: 'insensitive' } } } },
-          { lines: { some: { reference: { contains: q.search, mode: 'insensitive' } } } },
+          { number: { contains: escapeLike(q.search), mode: 'insensitive' } },
+          { subject: { contains: escapeLike(q.search), mode: 'insensitive' } },
+          { lines: { some: { designation: { contains: escapeLike(q.search), mode: 'insensitive' } } } },
+          { lines: { some: { reference: { contains: escapeLike(q.search), mode: 'insensitive' } } } },
         ],
       });
     }
@@ -652,13 +654,19 @@ export class PurchaseRequestsService {
     });
   }
 
-  /** Reprise : retour en revue si non approuvée, sinon statut d'avancement recalculé. */
+  /**
+   * Reprise : retour en revue si non approuvée, sinon statut d'avancement recalculé — y compris commandé / reçu
+   * si des BC ont avancé pendant l'attente ; une PR entièrement reçue sans écart est alors clôturée (audit ACH-02).
+   */
   async resume(ctx: AuthContext, id: string, dto: VersionDto) {
     return this.prisma.$transaction(async (tx) => {
       const pr = await this.core.findPr(ctx, id, tx);
       if (pr.status !== 'ON_HOLD') throw Errors.invalidState('Seule une PR en attente peut être reprise');
       const target: PrStatus = pr.approvedAt ? ((await this.core.derivePrStatus(id, tx)) ?? 'APPROVED') : 'UNDER_REVIEW';
-      return this.transitionTx(ctx, tx, pr, dto.expectedVersion, target, 'pr.resumed', dto.comment ?? null, {});
+      const after = await this.transitionTx(ctx, tx, pr, dto.expectedVersion, target, 'pr.resumed', dto.comment ?? null, {});
+      if (!pr.approvedAt) return after;
+      await this.core.recomputePrStatuses(ctx, [id], tx, 'pr.resumed');
+      return tx.purchaseRequest.findUniqueOrThrow({ where: { id } });
     });
   }
 
@@ -685,6 +693,14 @@ export class PurchaseRequestsService {
   async close(ctx: AuthContext, id: string, dto: CloseDto) {
     return this.prisma.$transaction(async (tx) => {
       const pr = await this.core.findPr(ctx, id, tx);
+      if (pr.status === 'SPLIT') {
+        // PR mère : clôturée seulement si toutes ses sous-PR sont terminées (rattrape les mères restées « Divisée »)
+        if (pr.lockVersion !== dto.expectedVersion) throw Errors.staleVersion(undefined, { currentVersion: pr.lockVersion });
+        await this.core.closeParentIfDone(ctx, id, tx, 'pr.close_requested');
+        const after = await tx.purchaseRequest.findUniqueOrThrow({ where: { id } });
+        if (after.status !== 'CLOSED') throw Errors.invalidState('PR divisée : elle se clôture quand toutes ses sous-PR sont clôturées, annulées ou rejetées');
+        return after;
+      }
       if (!PR_CLOSABLE_STATUSES.includes(pr.status)) throw Errors.invalidState(`Clôture impossible au statut ${pr.status}`);
       if (pr.status !== 'RECEIVED' && !dto.reason) throw Errors.validation('Clôture d’une PR non entièrement reçue : décision documentée (motif) obligatoire');
       return this.transitionTx(ctx, tx, pr, dto.expectedVersion, 'CLOSED', 'pr.closed', dto.reason ?? null, { closedAt: new Date() });
@@ -713,7 +729,7 @@ export class PurchaseRequestsService {
   private async transitionTx(
     ctx: AuthContext,
     tx: Tx,
-    pr: { id: string; status: PrStatus; vesselId: string; lockVersion: number },
+    pr: { id: string; status: PrStatus; vesselId: string; lockVersion: number; parentId?: string | null },
     expectedVersion: number,
     to: PrStatus,
     action: string,
@@ -724,6 +740,8 @@ export class PurchaseRequestsService {
     const after = await this.core.bumpPr(tx, pr, expectedVersion, { ...data, status: to });
     if (comment) await tx.prComment.create({ data: { prId: pr.id, authorId: ctx.userId, body: comment } });
     await this.core.audit(ctx, { action, entityType: 'purchase_request', entityId: pr.id, vesselId: pr.vesselId, before: { status: pr.status }, after: { status: to }, metadata: { comment } }, tx);
+    // Sous-PR terminée (annulée, rejetée, clôturée) : la PR mère « Divisée » se clôture si c'était la dernière (ACH-03)
+    if (pr.parentId && PR_TERMINAL_STATUSES.includes(to)) await this.core.closeParentIfDone(ctx, pr.parentId, tx, action);
     return after;
   }
 
@@ -774,9 +792,47 @@ export class PurchaseRequestsService {
     return this.prisma.$transaction(async (tx) => {
       const c = await tx.prComment.create({ data: { prId: id, revisionId: dto.revisionId ?? null, authorId: ctx.userId, body: dto.body } });
       await this.core.audit(ctx, { action: 'pr.comment_added', entityType: 'purchase_request', entityId: id, vesselId: pr.vesselId, after: { commentId: c.id, revisionId: c.revisionId } }, tx);
-      await this.notifyRequester(pr, `Nouveau commentaire sur la PR ${pr.number}`, dto.body.slice(0, 500), 'purchasing.pr_comment', tx, ctx.userId);
+      if (ctx.userId === pr.requesterId) {
+        // Message du demandeur : vers les Achats qui suivent la PR (audit ACH-07)
+        await this.notifications.notify(
+          {
+            userIds: await this.discussionBuyers(pr, tx),
+            excludeUserIds: [ctx.userId],
+            type: 'purchasing.pr_comment',
+            title: `Nouveau message du demandeur sur la PR ${pr.number}`,
+            body: dto.body.slice(0, 500),
+            module: 'purchasing',
+            entityType: 'purchase_request',
+            entityId: id,
+            vesselId: pr.vesselId,
+            link: LINKS.pr(id),
+            email: true,
+            requiredPermission: 'pr.view',
+          },
+          tx,
+        );
+      } else {
+        await this.notifyRequester(pr, `Nouveau commentaire sur la PR ${pr.number}`, dto.body.slice(0, 500), 'purchasing.pr_comment', tx, ctx.userId);
+      }
       return { ...c, authorName: ctx.displayName };
     });
+  }
+
+  /**
+   * Interlocuteurs Achats d'une PR : qui l'a mise en discussion ou y a déjà répondu ; à défaut, les détenteurs
+   * de pr.approve sur le navire. Les destinataires restent filtrés sur leurs droits réels par NotificationsService.
+   */
+  private async discussionBuyers(pr: { id: string; vesselId: string; requesterId: string }, tx: Tx): Promise<string[]> {
+    const [authors, reviewers] = await Promise.all([
+      tx.prComment.findMany({ where: { prId: pr.id, authorId: { not: pr.requesterId } }, select: { authorId: true }, distinct: ['authorId'] }),
+      tx.auditEvent.findMany({
+        where: { module: 'purchasing', entityType: 'purchase_request', entityId: pr.id, action: { in: ['pr.review_started', 'pr.approved', 'pr.split', 'pr.counter_applied'] } },
+        select: { actorId: true },
+      }),
+    ]);
+    const ids = new Set([...authors.map((a) => a.authorId), ...reviewers.map((r) => r.actorId)].filter((x): x is string => !!x && x !== pr.requesterId));
+    if (ids.size) return [...ids];
+    return this.access.usersWithPermission('pr.approve', pr.vesselId, tx);
   }
 
   // ---------------------------------------------------------------------------

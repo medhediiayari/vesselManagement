@@ -74,6 +74,8 @@ function PoView() {
   const cannotApprove = isCreator || po.approvedById === me.id;
   const receivable = isPoReceivable(po);
   const amendmentPending = s === 'APPROVAL_PENDING' && !!po.sentAt;
+  // Avenant approuvé d'un BC déjà transmis (avant correctif ACH-04) : noter l'envoi rétablit le statut de réception
+  const amendmentToSend = s === 'APPROVED' && !!po.sentAt;
   const canIssue = can('bc.create') && (s === 'DRAFT' || (s === 'APPROVED' && !po.sentAt));
 
   const actions = (
@@ -110,8 +112,8 @@ function PoView() {
           <PackageCheck className="h-4 w-4" aria-hidden /> Répondre par un BL
         </Button>
       )}
-      {RECEIVABLE.includes(s) && can('bc.send') && (
-        <Button variant="ghost" onClick={() => setDialog('markSent')}>
+      {(RECEIVABLE.includes(s) || amendmentToSend) && can('bc.send') && (
+        <Button variant={amendmentToSend ? 'secondary' : 'ghost'} onClick={() => setDialog('markSent')}>
           <MailCheck className="h-4 w-4" aria-hidden /> Noter l’envoi au fournisseur
         </Button>
       )}
@@ -178,6 +180,12 @@ function PoView() {
         <Callout tone="warn" className="mb-4" title={`Avenant n°${po.revisionNo} en attente de second regard`}>
           Cet avenant à la hausse d’un BC déjà émis doit être approuvé (bc.approve) par une autre personne que son auteur et que le créateur du BC ; il ne peut pas
           être renvoyé en brouillon. Les BL et réceptions restent possibles.
+        </Callout>
+      )}
+      {amendmentToSend && (
+        <Callout tone="warn" className="mb-4" title={`Avenant n°${po.revisionNo} approuvé — envoi au fournisseur à noter`}>
+          Transmettez la nouvelle version au fournisseur puis cliquez « Noter l’envoi au fournisseur » : le BC reprend son statut de réception et se clôture
+          automatiquement si tout a été reçu.
         </Callout>
       )}
       {s === 'CANCELLED' && (

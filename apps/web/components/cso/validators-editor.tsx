@@ -102,6 +102,10 @@ export function ValidatorsDialog({
                   </ul>
                 </>
               )}
+              <p className="mt-2 text-xs text-ink-muted">
+                Les profils autorisés à publier directement (Super Admin, CSO…) publient leurs propres versions sans passer par ces validateurs, dès lors
+                qu&apos;ils ont le droit d&apos;approuver dans ce dossier.
+              </p>
             </section>
             <section>
               <h3 className="mb-1 text-sm font-semibold">Désignés sur ce dossier ({draft.length})</h3>

@@ -291,3 +291,19 @@ export function restorationSource<V extends VersionLike>(versions: V[]): V | nul
   approved.sort((a, b) => b.publishedAt!.getTime() - a.publishedAt!.getTime() || b.versionNo - a.versionNo);
   return approved[0] ?? null;
 }
+
+export type RestoreMode = 'APPROVAL' | 'DRAFT';
+
+/**
+ * Mode de restauration d'un document archivé (CSO-03) :
+ *  - APPROVAL : déjà approuvé au moins une fois -> dernière version approuvée soumise à nouvelle approbation ;
+ *  - DRAFT : archivé avant toute approbation -> retour en brouillon avec le dernier fichier déposé.
+ *    Rien n'est soumis aux validateurs ni présenté comme déjà approuvé (audit #10) : le déposant le
+ *    soumettra (ou l'annulera) lui-même.
+ */
+export function restorePlan<V extends VersionLike>(versions: V[]): { mode: RestoreMode; source: V } | null {
+  const approved = restorationSource(versions);
+  if (approved) return { mode: 'APPROVAL', source: approved };
+  const last = versions.reduce<V | null>((best, v) => (!best || v.versionNo > best.versionNo ? v : best), null);
+  return last ? { mode: 'DRAFT', source: last } : null;
+}

@@ -4,16 +4,33 @@ import { Errors } from '../../common/errors';
 import { cursorArgs, toPage } from '../../common/pagination';
 import { PrismaService, Tx } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
-import { AuthContext, canAccessVessel, vesselWhere } from '../access/auth-context';
+import { creatorLabels } from '../../common/utils/creators';
+import { AuthContext, can, canAccessVessel, vesselWhere } from '../access/auth-context';
 import { isMemberVisible, memberVisibilityWhere } from '../access/member-access';
 import { AuditService, diffFields } from '../audit/audit.service';
 import {
+  CertificateCheckQuery,
   JoinAssignmentDto,
   ListAssignmentsQuery,
   SignOffAssignmentDto,
   UpdateAssignmentDto,
 } from './crew-assignments.dto';
-import { CREW_TRANSITIONS, canTransitionCrew, deriveMemberStatus, todayYmd, ymd } from './members.logic';
+import {
+  crewCertificateAlerts,
+  crewCertificateAuditSummary,
+  crewCertificateWarningMessages,
+  crewCheckEnd,
+  type CrewCertificateAlert,
+} from './crew-certificates.logic';
+import {
+  CREW_TRANSITIONS,
+  canTransitionCrew,
+  deriveMemberStatus,
+  onboardAtDateWhere,
+  planBlockedByOnboardElsewhere,
+  todayYmd,
+  ymd,
+} from './members.logic';
 
 const ASSIGNMENT_INCLUDE = {
   vessel: { select: { id: true, code: true, name: true } },
@@ -32,6 +49,13 @@ export function presentAssignment(a: CrewAssignment | AssignmentWithRefs) {
     actualSignOffDate: ymd(a.actualSignOffDate),
   };
 }
+
+/** Certificats d'un marin : `certificates.view` + `members.certificates.view` (formule de CertificateAccessService). */
+function canSeeMemberCertificates(ctx: AuthContext): boolean {
+  return can(ctx, 'certificates.view') && can(ctx, 'members.certificates.view');
+}
+
+const CERTIFICATE_CHECK_DENIED = 'Permissions certificates.view et members.certificates.view requises pour ce contrôle';
 
 const DEPARTMENT_ORDER: Record<string, number> = { DECK: 0, ENGINE: 1, CATERING: 2, OTHER: 3 };
 
@@ -87,14 +111,33 @@ export class CrewAssignmentsService {
       this.prisma.crewAssignment.count({ where }),
     ]);
     const page = toPage(rows, q, total);
-    return { ...page, items: page.items.map(presentAssignment) };
+    return { ...page, items: await this.withCreators(page.items.map(presentAssignment)) };
   }
 
   async get(ctx: AuthContext, id: string) {
     const a = await this.prisma.crewAssignment.findUnique({ where: { id }, include: ASSIGNMENT_INCLUDE });
     if (!a) throw Errors.notFound('Affectation');
     this.access.assertVesselAccess(ctx, a.vesselId);
-    return presentAssignment(a);
+    const [withCreator] = await this.withCreators([presentAssignment(a)]);
+    return withCreator;
+  }
+
+  /**
+   * Prévisualisation (avant confirmation) des certificats du marin expirés ou expirant avant la fin
+   * de la période : mêmes contrôles de périmètre que plan() (navire + fiche ADM-070) ; sans droit de
+   * lecture des certificats de marins, aucune donnée n'est renvoyée.
+   */
+  async certificateCheck(ctx: AuthContext, q: CertificateCheckQuery) {
+    this.access.assertVesselAccess(ctx, q.vesselId);
+    const exists = await this.prisma.member.count({ where: { id: q.memberId } });
+    if (!exists) throw Errors.notFound('Member');
+    if (!(await isMemberVisible(this.prisma, ctx, q.memberId))) {
+      throw Errors.scopeDenied('Fiche Member hors de votre périmètre (ADM-070) : affectation réservée au service Crewing transversal');
+    }
+    await this.assertVoyage(q.voyageId, q.vesselId);
+    if (!canSeeMemberCertificates(ctx)) return { available: false as const, reason: CERTIFICATE_CHECK_DENIED };
+    const check = await this.memberCertificateAlerts(q.memberId, q.plannedSignOffDate ?? null, q.voyageId ?? null);
+    return { available: true as const, end: ymd(check.end), items: check.items, counts: check.counts };
   }
 
   /** Planification (PLANNED) : navire actif du périmètre et fiche visible (ADM-070). */
@@ -121,7 +164,22 @@ export class CrewAssignmentsService {
     if (existing) {
       throw Errors.conflict('Ce marin a déjà une affectation planifiée ou en cours sur ce navire', { assignmentId: existing.id, status: existing.status });
     }
+    const onboardElsewhere = await this.prisma.crewAssignment.findFirst({
+      where: { memberId: dto.memberId, status: 'ONBOARD', vesselId: { not: dto.vesselId } },
+      include: { vessel: { select: { name: true } } },
+    });
+    if (planBlockedByOnboardElsewhere(ymd(dto.plannedJoinDate), todayYmd(), !!onboardElsewhere)) {
+      const where = canAccessVessel(ctx, onboardElsewhere!.vesselId) ? `sur ${onboardElsewhere!.vessel.name}` : 'sur un autre navire';
+      throw Errors.business(
+        `Ce marin est encore à bord ${where} et la date d'embarquement prévue est déjà passée : enregistrez d'abord son débarquement, ou choisissez une date à venir`,
+        { reason: 'MEMBER_ONBOARD_ELSEWHERE' },
+      );
+    }
     const warnings = await this.overlapWarnings(ctx, dto);
+    // Certificats : recalculés côté serveur (jamais repris du client), tracés dans l'audit même si
+    // l'appelant ne peut pas les lire ; renvoyés dans les warnings seulement s'il en a le droit
+    const certCheck = await this.memberCertificateAlerts(dto.memberId, dto.plannedSignOffDate ?? null, dto.voyageId ?? null);
+    const certificateWarnings = canSeeMemberCertificates(ctx) ? crewCertificateWarningMessages(certCheck.items, certCheck.end) : [];
 
     const created = await this.prisma.$transaction(async (tx) => {
       const a = await tx.crewAssignment.create({
@@ -143,13 +201,21 @@ export class CrewAssignmentsService {
       });
       await this.audit.record(
         ctx,
-        { action: 'crew_assignment.planned', module: 'fleet', entityType: 'crew_assignment', entityId: a.id, vesselId: a.vesselId, after: presentAssignment(a) },
+        {
+          action: 'crew_assignment.planned',
+          module: 'fleet',
+          entityType: 'crew_assignment',
+          entityId: a.id,
+          vesselId: a.vesselId,
+          after: presentAssignment(a),
+          metadata: this.certificateAuditMetadata(ctx, certCheck),
+        },
         tx,
       );
       await this.syncMemberStatus(tx, ctx, a.memberId, { assignmentId: a.id, event: 'PLANNED' });
       return a;
     });
-    return { ...presentAssignment(created), warnings };
+    return { ...presentAssignment(created), warnings: [...warnings, ...certificateWarnings], certificateWarnings };
   }
 
   /** Modification d'une affectation PLANNED / ONBOARD (dates prévues, rang, voyage, relève…). */
@@ -182,7 +248,14 @@ export class CrewAssignmentsService {
     const a = await this.loadAccessible(ctx, id);
     this.assertTransition(a.status, 'ONBOARD');
     this.assertNotFuture(dto.actualJoinDate, 'Date d’embarquement');
+    // Audit FLT-05 : aucun embarquement sur un navire vendu ou inactif
+    const vessel = await this.prisma.vessel.findUnique({ where: { id: a.vesselId }, select: { status: true } });
+    if (vessel?.status === 'SOLD' || vessel?.status === 'INACTIVE') {
+      throw Errors.business('Navire vendu ou inactif : embarquement impossible. Annulez cette affectation planifiée.');
+    }
     await this.assertNotOnboardElsewhere(ctx, a.memberId, a.id);
+    const certCheck = await this.memberCertificateAlerts(a.memberId, a.plannedSignOffDate, a.voyageId);
+    const certificateWarnings = canSeeMemberCertificates(ctx) ? crewCertificateWarningMessages(certCheck.items, certCheck.end) : [];
     try {
       return await this.prisma.$transaction(async (tx) => {
         const relieved: string[] = [];
@@ -231,12 +304,15 @@ export class CrewAssignmentsService {
             vesselId: a.vesselId,
             before: { status: 'PLANNED' },
             after: { status: 'ONBOARD', actualJoinDate: ymd(dto.actualJoinDate), joinPort: after.joinPort },
-            metadata: relieved.length ? { relievedAssignmentIds: relieved } : undefined,
+            metadata:
+              relieved.length || certCheck.items.length
+                ? { ...(relieved.length ? { relievedAssignmentIds: relieved } : {}), ...this.certificateAuditMetadata(ctx, certCheck) }
+                : undefined,
           },
           tx,
         );
         await this.syncMemberStatus(tx, ctx, a.memberId, { assignmentId: id, event: 'JOINED' });
-        return { ...presentAssignment(after), relievedAssignmentIds: relieved };
+        return { ...presentAssignment(after), relievedAssignmentIds: relieved, warnings: certificateWarnings, certificateWarnings };
       });
     } catch (e) {
       throw (await this.translateOnboardConflict(ctx, e, a.memberId)) ?? e;
@@ -310,9 +386,7 @@ export class CrewAssignmentsService {
     if (!vessel) throw Errors.notFound('Navire');
     const today = todayYmd();
     const dateStr = date ? ymd(date)! : null;
-    const onboardWhere: Prisma.CrewAssignmentWhereInput = date
-      ? { vesselId, status: { in: ['ONBOARD', 'COMPLETED'] }, actualJoinDate: { lte: date }, OR: [{ actualSignOffDate: null }, { actualSignOffDate: { gte: date } }] }
-      : { vesselId, status: 'ONBOARD' };
+    const onboardWhere: Prisma.CrewAssignmentWhereInput = date ? onboardAtDateWhere(vesselId, date) : { vesselId, status: 'ONBOARD' };
     const plannedWhere: Prisma.CrewAssignmentWhereInput | null = !date
       ? { vesselId, status: 'PLANNED' }
       : dateStr! >= today
@@ -335,6 +409,7 @@ export class CrewAssignmentsService {
       const r = rankInfo(a.rank);
       return [DEPARTMENT_ORDER[r?.crewDepartment ?? a.member.crewDepartment ?? 'OTHER'] ?? 9, r?.sortOrder ?? 999, a.member.lastName] as const;
     };
+    const creators = await creatorLabels(this.prisma, [...onboard, ...planned].map((a) => a.createdById));
     const sorted = (list: AssignmentWithRefs[]) =>
       [...list]
         .sort((x, y) => {
@@ -342,7 +417,11 @@ export class CrewAssignmentsService {
           const [a2, b2, c2] = sortKey(y);
           return a1 - a2 || b1 - b2 || c1.localeCompare(c2);
         })
-        .map((a) => ({ ...presentAssignment(a), memberAccessible: visible.has(a.memberId) }));
+        .map((a) => ({
+          ...presentAssignment(a),
+          createdBy: a.createdById ? (creators.get(a.createdById) ?? null) : null,
+          memberAccessible: visible.has(a.memberId),
+        }));
     return {
       vessel,
       date: dateStr,
@@ -400,6 +479,39 @@ export class CrewAssignmentsService {
   private async assertNotOnboardElsewhere(ctx: AuthContext, memberId: string, assignmentId: string) {
     const count = await this.prisma.crewAssignment.count({ where: { memberId, status: 'ONBOARD', id: { not: assignmentId } } });
     if (count) throw await this.onboardConflict(ctx, memberId, assignmentId);
+  }
+
+  /** Ajoute `createdBy` (nom + rôles) : savoir qui a planifié avant d'annuler ou de modifier. */
+  private async withCreators<T extends { createdById: string | null }>(rows: T[]) {
+    const labels = await creatorLabels(this.prisma, rows.map((r) => r.createdById));
+    return rows.map((r) => ({ ...r, createdBy: r.createdById ? (labels.get(r.createdById) ?? null) : null }));
+  }
+
+  /**
+   * Certificats courants du marin (non archivés, révision courante présente — mêmes critères que le
+   * contrôle voyage) confrontés à la fin de période : débarquement prévu, ou fin estimée du voyage
+   * (ETA, sinon fin de laycan) si elle est plus tardive.
+   */
+  private async memberCertificateAlerts(memberId: string, plannedSignOffDate: Date | null, voyageId: string | null) {
+    const [voyage, certs] = await Promise.all([
+      voyageId ? this.prisma.voyage.findUnique({ where: { id: voyageId }, select: { eta: true, laycanTo: true } }) : null,
+      this.prisma.certificate.findMany({
+        where: { memberId, subjectKind: 'MEMBER', archivedAt: null, currentRevisionId: { not: null } },
+        select: { id: true, currentNumber: true, currentExpiryKind: true, currentExpiryOn: true, type: { select: { name: true, code: true } } },
+      }),
+    ]);
+    const end = crewCheckEnd(plannedSignOffDate, voyage);
+    return { end, ...crewCertificateAlerts(certs, end, new Date()) };
+  }
+
+  /** Métadonnées d'audit : liste courte des alertes certificats (aucune alerte -> undefined). */
+  private certificateAuditMetadata(ctx: AuthContext, check: { end: Date | null; items: CrewCertificateAlert[] }) {
+    if (!check.items.length) return undefined;
+    return {
+      certificateWarnings: crewCertificateAuditSummary(check.items),
+      certificateCheckEnd: ymd(check.end),
+      certificateWarningsShown: canSeeMemberCertificates(ctx),
+    };
   }
 
   private async loadAccessible(ctx: AuthContext, id: string) {

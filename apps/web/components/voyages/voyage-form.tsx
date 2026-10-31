@@ -115,6 +115,16 @@ export function VoyageFormDialog({
   const cps = useLinkableCps(f.vesselId, voyage?.id ?? null, open && !editing && can('charter_party.view'));
   const laycanError = f.laycanFrom && f.laycanTo && f.laycanFrom > f.laycanTo ? 'La date de début doit précéder la date de fin' : undefined;
   const vessels = me.accessibleVessels.filter((v) => v.status !== 'SOLD');
+  // Mêmes contrôles que l'API (audit FLT-06) : valeurs « AAAA-MM-JJTHH:mm » UTC, comparables comme chaînes
+  const actualLimit = new Date(Date.now() + 24 * 3_600_000).toISOString().slice(0, 16);
+  const baseForm = base ? initial(base) : null;
+  const futureActual = (k: 'atd' | 'ata') => !!f[k] && f[k] > actualLimit && f[k] !== baseForm?.[k];
+  const timeErrors = {
+    eta: f.etd && f.eta && f.etd > f.eta ? 'L’ETA doit suivre l’ETD' : undefined,
+    atd: futureActual('atd') ? 'Date réelle dans le futur' : undefined,
+    ata: f.atd && f.ata && f.atd > f.ata ? 'L’ATA doit suivre l’ATD' : futureActual('ata') ? 'Date réelle dans le futur' : undefined,
+  };
+  const timeInvalid = Object.values(timeErrors).some(Boolean);
 
   const changes = useMemo(() => {
     if (!base) return null;
@@ -154,11 +164,11 @@ export function VoyageFormDialog({
   const schedule = (
     <div className="grid gap-3 sm:grid-cols-2">
       <UtcDateTimeField label="ETD" value={f.etd} onChange={set('etd')} />
-      <UtcDateTimeField label="ETA" value={f.eta} onChange={set('eta')} hint="Arrivée estimée au port de destination." />
+      <UtcDateTimeField label="ETA" value={f.eta} onChange={set('eta')} hint="Arrivée estimée au port de destination." error={timeErrors.eta} />
       {editing && (
         <>
-          <UtcDateTimeField label="ATD" value={f.atd} onChange={set('atd')} hint="Départ réel." />
-          <UtcDateTimeField label="ATA" value={f.ata} onChange={set('ata')} hint="Arrivée réelle." />
+          <UtcDateTimeField label="ATD" value={f.atd} onChange={set('atd')} hint="Départ réel." error={timeErrors.atd} />
+          <UtcDateTimeField label="ATA" value={f.ata} onChange={set('ata')} hint="Arrivée réelle." error={timeErrors.ata} />
         </>
       )}
     </div>
@@ -183,7 +193,7 @@ export function VoyageFormDialog({
           <Button
             onClick={save}
             loading={busy}
-            disabled={!!laycanError || (!editing && !f.vesselId) || (editing && changes !== null && Object.keys(changes).length === 0)}
+            disabled={!!laycanError || timeInvalid || (!editing && !f.vesselId) || (editing && changes !== null && Object.keys(changes).length === 0)}
           >
             {editing ? 'Enregistrer' : 'Créer le voyage'}
           </Button>

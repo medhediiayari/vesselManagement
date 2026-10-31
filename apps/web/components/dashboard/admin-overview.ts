@@ -31,7 +31,6 @@ export const JOB_LABELS: Record<string, string> = {
   'purchasing-followup': 'Suivi achats',
   'voyage-notices': 'Notices de voyage',
   'orphan-files-cleanup': 'Purge des dépôts non rattachés',
-  'outbox-dispatch': 'Diffusion des événements',
 };
 
 /** Compteur borné par la pagination serveur (200 max) : « 200+ » plutôt qu'un chiffre faux. */
@@ -72,6 +71,13 @@ export function useAdminOverview() {
     enabled: canAuthAudit,
     staleTime: 60_000,
   });
+  // Seuil de verrouillage réel (paramètre), lisible seulement avec settings.manage (ADM-17)
+  const settings = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => api.get<{ 'auth.maxFailedLogins'?: number }>('/settings'),
+    enabled: canSystem,
+    staleTime: 60_000,
+  });
   const system = useQuery({
     queryKey: ['system-status'],
     queryFn: () => api.get<SystemStatus>('/system/status'),
@@ -95,6 +101,7 @@ export function useAdminOverview() {
       deactivated: deactivated.data?.total,
       locked: locked.data?.total,
       lockedList: locked.data?.items ?? [],
+      maxFailedLogins: settings.data?.['auth.maxFailedLogins'],
       loading: active.isLoading || deactivated.isLoading || locked.isLoading,
       error: active.error ?? deactivated.error ?? locked.error,
     },

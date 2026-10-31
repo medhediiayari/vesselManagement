@@ -95,3 +95,12 @@ export const NAV: NavGroup[] = [
     ],
   },
 ];
+
+/**
+ * Page d'accueil selon les droits : tableau de bord, sinon première entrée de navigation autorisée
+ * (ex. Crewing sans `dashboard.view` → Marins & personnel, ADM-09). Notifications en dernier recours.
+ */
+export function homeHref(canAny: (...permissions: string[]) => boolean): string {
+  for (const group of NAV) for (const item of group.items) if (item.anyOf && canAny(...item.anyOf)) return item.href;
+  return '/notifications';
+}

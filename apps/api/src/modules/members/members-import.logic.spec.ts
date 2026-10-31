@@ -19,6 +19,7 @@ import {
   suggestMapping,
   suggestSheetDefaults,
   suggestTarget,
+  validateNormalizedMember,
 } from './member-import.logic';
 import { rankCandidates, scoreDuplicate } from './members.logic';
 
@@ -330,5 +331,21 @@ describe('Détection des doublons (ADM-042)', () => {
       { field: 'phone', current: null, imported: '+216 20 000 000', changed: true, protected: false },
     ]);
     expect(identityOf({ lastName: 'A', firstName: 'B', nationality: 'TN', passportNumber: 'P' })).toMatchObject({ passportCountry: 'TN' });
+  });
+});
+
+describe('Contrôles partagés avec la saisie manuelle (audit FLT-03 / FLT-13)', () => {
+  const base = { lastName: 'BEN SALAH', firstName: 'Ali' } as Parameters<typeof validateNormalizedMember>[0];
+
+  it('refuse une date inexistante, une naissance avant 1900 et une expiration antérieure à la naissance', () => {
+    expect(validateNormalizedMember({ ...base, birthDate: '1990-02-30' }).map((e) => e.field)).toEqual(['birthDate']);
+    expect(validateNormalizedMember({ ...base, birthDate: '1850-01-01' }).map((e) => e.field)).toEqual(['birthDate']);
+    expect(validateNormalizedMember({ ...base, birthDate: '1990-01-01', passportExpiry: '1989-01-01' }).map((e) => e.field)).toEqual(['passportExpiry']);
+    expect(validateNormalizedMember({ ...base, birthDate: '1990-01-01', nationality: 'TN' })).toEqual([]);
+  });
+
+  it('« XX » n’est pas un pays', () => {
+    expect(resolveCountry('XX')).toBeNull();
+    expect(validateNormalizedMember({ ...base, nationality: 'XX' }).map((e) => e.field)).toEqual(['nationality']);
   });
 });

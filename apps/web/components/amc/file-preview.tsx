@@ -25,6 +25,8 @@ export function FilePreviewDialog({
   downloadPath,
   canDownload,
   kind,
+  description,
+  actions,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -33,6 +35,9 @@ export function FilePreviewDialog({
   downloadPath?: string;
   canDownload?: boolean;
   kind?: string;
+  description?: ReactNode;
+  /** Actions métier supplémentaires (pied de la fenêtre, avant « Télécharger ») */
+  actions?: ReactNode;
 }) {
   const [zoom, setZoom] = useState(1);
   const [rotate, setRotate] = useState(0);
@@ -51,6 +56,7 @@ export function FilePreviewDialog({
       open={open}
       onOpenChange={onOpenChange}
       title={title}
+      description={description}
       size="xl"
       footer={
         <>
@@ -68,6 +74,7 @@ export function FilePreviewDialog({
               </Button>
             </div>
           )}
+          {actions}
           {canDownload && downloadPath && (
             <DownloadButton path={downloadPath} />
           )}

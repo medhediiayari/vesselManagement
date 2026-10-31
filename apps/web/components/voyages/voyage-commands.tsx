@@ -15,6 +15,7 @@ import { FormError, Notice } from './common';
 import { CP_STATUS_LABELS, voyageKeys } from './lib';
 import { useLinkableCps } from './voyage-form';
 import type { VoyageBase, VoyageStatus, VoyageWorkspace } from './types';
+import { createdBySentence } from '@/components/amc/created-by';
 
 type Command = 'plan' | 'activate' | 'complete' | 'cancel';
 
@@ -42,7 +43,7 @@ function candidatesOf(e: unknown): Candidate[] | null {
  * Jamais de modification directe du statut : chaque commande passe par l'API avec expectedVersion.
  */
 export function VoyageCommands({ ws }: { ws: VoyageWorkspace }) {
-  const { can } = useSession();
+  const { can, me } = useSession();
   const qc = useQueryClient();
   const v = ws.overview;
   const [cmd, setCmd] = useState<Command | null>(null);
@@ -173,7 +174,9 @@ export function VoyageCommands({ ws }: { ws: VoyageWorkspace }) {
         )}
         {cmd === 'cancel' && (
           <Notice tone="warn" className="mb-3">
-            Un voyage annulé passe en lecture seule ; aucun fichier ne peut plus y être ajouté.
+            Ce voyage a été {createdBySentence(v.createdBy, v.createdAt, 'créé')}
+            {v.createdById !== me.id ? ' : vous n’en êtes pas l’auteur, prévenez-le avant d’annuler.' : '.'} Un voyage annulé passe en
+            lecture seule ; aucun fichier ne peut plus y être ajouté.
           </Notice>
         )}
         {(cmd === 'plan' || candidates) && cpOptions.length > 0 && (

@@ -29,6 +29,7 @@ import { TimelineTab } from '@/components/voyages/tab-timeline';
 import type { VoyageWorkspace } from '@/components/voyages/types';
 import { VoyageCommands } from '@/components/voyages/voyage-commands';
 import { VoyageFormDialog } from '@/components/voyages/voyage-form';
+import { CreatedBy } from '@/components/amc/created-by';
 
 const TABS = ['overview', 'ports', 'cargo', 'notices', 'cp', 'instructions', 'checklist', 'noon', 'files', 'timeline'] as const;
 type Tab = (typeof TABS)[number];
@@ -83,6 +84,7 @@ function Workspace() {
             <VoyageStatusBadge status={v.status} />
           </span>
         }
+        meta={<CreatedBy by={v.createdBy} at={v.createdAt} />}
         actions={
           <>
             {can('noon.create') && reportable && showNoon && (

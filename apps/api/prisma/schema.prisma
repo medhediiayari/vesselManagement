@@ -1065,7 +1065,10 @@ model Certificate {
   archivedAt        DateTime?              @map("archived_at") @db.Timestamptz(3)
   archivedById      String?                @map("archived_by_id") @db.Uuid
   archiveReason     String?                @map("archive_reason") @db.VarChar(500)
+  /// Classement dans l'arborescence (certificates.folders.manage) — sans effet sur les droits
+  folderId          String?                @map("folder_id") @db.Uuid
 
+  folder          CertificateFolder?           @relation(fields: [folderId], references: [id], onDelete: SetNull)
   vessel          Vessel?                      @relation(fields: [vesselId], references: [id])
   member          Member?                      @relation(fields: [memberId], references: [id])
   type            CertificateType              @relation(fields: [typeId], references: [id])
@@ -1079,7 +1082,38 @@ model Certificate {
   @@index([vesselId, typeId])
   @@index([memberId, typeId])
   @@index([currentExpiryKind, currentExpiryOn])
+  @@index([folderId])
   @@map("certificates")
+}
+
+/// Dossiers de l'arborescence Certificats (classement libre, hiérarchique) — certificates.folders.manage
+model CertificateFolder {
+  id          String   @id @default(uuid()) @db.Uuid
+  parentId    String?  @map("parent_id") @db.Uuid
+  name        String   @db.VarChar(120)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  parent       CertificateFolder?  @relation("CertificateFolderTree", fields: [parentId], references: [id])
+  children     CertificateFolder[] @relation("CertificateFolderTree")
+  certificates Certificate[]
+
+  @@index([parentId])
+  @@map("certificate_folders")
+}
+
+/// Catégories de l'arborescence (référentiel de CertificateType.category) — certificates.categories.manage
+model CertificateCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(60)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("certificate_categories")
 }
 
 enum RevisionLifecycle {

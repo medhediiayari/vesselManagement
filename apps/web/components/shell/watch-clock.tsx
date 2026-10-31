@@ -48,6 +48,15 @@ export function WatchClock() {
   const tz = vessel.data?.timezone ?? null;
 
   if (!now) return null;
+  // Fuseau invalide sur la fiche navire : on masque l'heure bord plutôt que de faire planter l'en-tête (audit FLT-01)
+  let board: { time: string; offset: string } | null = null;
+  if (currentVessel && tz) {
+    try {
+      board = { time: fmt(now, tz), offset: offsetLabel(now, tz) };
+    } catch {
+      board = null;
+    }
+  }
   return (
     <div className="hidden items-stretch divide-x divide-line rounded-md border border-line bg-surface-sunken text-xs xl:flex" aria-label="Heures de référence">
       <div className="flex items-baseline gap-1.5 px-2.5 py-1">
@@ -56,11 +65,17 @@ export function WatchClock() {
           {fmt(now, 'UTC')}
         </time>
       </div>
-      {currentVessel && tz && (
+      {currentVessel && tz && board && (
         <div className="flex items-baseline gap-1.5 px-2.5 py-1" title={`Heure bord ${currentVessel.name} — ${tz}`}>
           <span className="font-semibold text-ink-muted">Bord</span>
-          <time className="tabular font-semibold text-navy">{fmt(now, tz)}</time>
-          <span className="tabular text-2xs text-ink-muted">{offsetLabel(now, tz)}</span>
+          <time className="tabular font-semibold text-navy">{board.time}</time>
+          <span className="tabular text-2xs text-ink-muted">{board.offset}</span>
+        </div>
+      )}
+      {currentVessel && tz && !board && (
+        <div className="flex items-baseline gap-1.5 px-2.5 py-1" title={`Fuseau « ${tz} » non reconnu sur la fiche ${currentVessel.name}`}>
+          <span className="font-semibold text-ink-muted">Bord</span>
+          <span className="text-ink-muted">fuseau invalide</span>
         </div>
       )}
     </div>

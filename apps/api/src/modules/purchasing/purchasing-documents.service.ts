@@ -29,6 +29,9 @@ const PR_STATUS_FR: Record<string, string> = {
   SPLIT: 'Divisée en sous-PR',
 };
 
+/** Libellés FR des priorités (mêmes libellés que l'interface — audit ACH-15). */
+const PR_PRIORITY_FR: Record<string, string> = { LOW: 'Basse', NORMAL: 'Normale', HIGH: 'Haute', URGENT: 'Urgente' };
+
 /**
  * Documents PDF Achats (V1 §9.2 « Export PDF des PR/BC/Receiving Report ») : numérotation cohérente,
  * informations navire, attribution horodatée des approbations — pas de signature cryptographique en V1 (CDC §17).
@@ -73,7 +76,7 @@ export class PurchasingDocuments {
             ['Demandeur', names.get(pr.requesterId) ?? pr.requesterId],
             ['Département', dept?.name],
             ['Catégorie', pr.category],
-            ['Priorité', pr.priority],
+            ['Priorité', PR_PRIORITY_FR[pr.priority] ?? pr.priority],
             ['Besoin pour le', day(pr.neededBy)],
             ['Formulaire', pr.formRef],
             ['Circuit de revue appliqué', circuit?.label ?? '—'],

@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { Award, CheckSquare, ShoppingCart, Sparkles, Undo2 } from 'lucide-react';
+import { AlertTriangle, Award, CheckSquare, ShoppingCart, Sparkles, Undo2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
@@ -18,6 +18,12 @@ import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states';
 import { COMPLIANCE_LABELS, COMPLIANCE_TONES, QUOTATION_STATUS_LABELS, QUOTATION_STATUS_TONES, commandError, dec, decimalError, purKeys, toApiDecimal, useCommand } from './lib';
 import type { Comparison, ComparisonOffer, PoDetail, PoListItem, RfqDetail, Selection } from './types';
 import { Callout, DecimalInput, FormField, Money, PoStatusBadge, StatusPill, TextActionDialog } from './ui';
+
+/** Comparaison d'unités insensible à la casse, aux accents et aux espaces (même règle que l'API). */
+function sameUnit(a: string | null | undefined, b: string | null | undefined): boolean {
+  const n = (u: string | null | undefined) => (u ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return n(a) === n(b);
+}
 
 function OfferCell({ offer, unit, selecting, value, onChange }: { offer: ComparisonOffer | undefined; unit: string; selecting: boolean; value: string; onChange: (v: string) => void }) {
   if (!offer) return <span className="text-xs italic text-ink-soft">Non chiffré</span>;
@@ -46,6 +52,11 @@ function OfferCell({ offer, unit, selecting, value, onChange }: { offer: Compari
           </Badge>
         )}
         {offer.compliance !== 'COMPLIANT' && <StatusPill status={offer.compliance} labels={COMPLIANCE_LABELS} tones={COMPLIANCE_TONES} />}
+        {offer.unit && !sameUnit(offer.unit, unit) && (
+          <Badge tone="warn" icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
+            Unité {offer.unit} ≠ {unit}
+          </Badge>
+        )}
         {dec.gt0(offer.selectedQuantity) && (
           <Badge tone="info" icon={<CheckSquare className="h-3.5 w-3.5" aria-hidden />}>
             Retenu {fmtDecimal(offer.selectedQuantity)}
@@ -78,6 +89,7 @@ export function ComparisonTab({ rfq }: { rfq: RfqDetail }) {
   const c = q.data;
   if (!c.quotations.length) return <EmptyState title="Aucun devis à comparer" description="Saisissez au moins un devis fournisseur pour alimenter le comparateur." />;
 
+  const unitMismatch = c.lines.some((l) => l.offers.some((o) => o.unit && !sameUnit(o.unit, l.unit)));
   const chosen = Object.entries(picks).filter(([, v]) => v.trim());
   const pickErrors = chosen.map(([, v]) => decimalError(v, { positive: true, scale: 3 })).filter(Boolean);
 
@@ -120,6 +132,12 @@ export function ComparisonTab({ rfq }: { rfq: RfqDetail }) {
   return (
     <div className="space-y-4">
       {c.fxNote && <Callout tone="info" title="Plusieurs devises">{c.fxNote}</Callout>}
+      {unitMismatch && (
+        <Callout tone="warn" title="Unités différentes de la RFQ">
+          Certaines offres sont exprimées dans une autre unité que la ligne consultée (ex. boîte au lieu de pièces) : leurs prix unitaires ne sont pas directement
+          comparables, et le BC est établi dans l’unité de la RFQ. Vérifiez quantités et prix avant de retenir ou de commander ces offres.
+        </Callout>
+      )}
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {Object.entries(c.totalsByCurrency).map(([cur, rows]) => (
@@ -293,12 +311,39 @@ interface Group {
   selections: Selection[];
 }
 
-function CreatePoDialog({ open, onOpenChange, rfq, group }: { open: boolean; onOpenChange: (o: boolean) => void; rfq: RfqDetail; group: Group }) {
+function CreatePoDialog({
+  open,
+  onOpenChange,
+  rfq,
+  group,
+  firstOrder,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  rfq: RfqDetail;
+  group: Group;
+  /** Premier BC issu de ce devis : fret et taxes du devis sont proposés (pas sur un BC suivant, pour ne pas les compter deux fois) */
+  firstOrder: boolean;
+}) {
   const router = useRouter();
   const run = useCommand();
   const lineById = new Map(rfq.lines.map((l) => [l.id, l]));
+  const quote = (rfq.quotations ?? []).find((x) => x.id === group.quotationId);
+  const discount = quote?.discountAmount && dec.gt0(quote.discountAmount) ? quote.discountAmount : null;
   const [qty, setQty] = useState<Record<string, string>>(() => Object.fromEntries(group.selections.map((s) => [s.quotationLineId, s.quantity])));
-  const [h, setH] = useState({ expectedDeliveryDate: '', deliveryPort: rfq.deliveryPort ?? '', deliveryTerms: rfq.deliveryTerms ?? '', paymentTerms: '', notes: '', taxAmount: '', freightAmount: '' });
+  const [h, setH] = useState({
+    expectedDeliveryDate: '',
+    deliveryPort: rfq.deliveryPort ?? '',
+    deliveryTerms: rfq.deliveryTerms ?? '',
+    paymentTerms: '',
+    notes: '',
+    // Repris du devis (ACH-10) ; modifiables si le BC ne reprend qu'une partie du devis
+    taxAmount: firstOrder && quote?.taxAmount && dec.gt0(quote.taxAmount) ? quote.taxAmount : '',
+    freightAmount: firstOrder && quote?.freightAmount && dec.gt0(quote.freightAmount) ? quote.freightAmount : '',
+  });
+  const unitWarnings = group.selections
+    .map((s) => ({ s, l: lineById.get(s.quotationLine.rfqLineId) }))
+    .filter(({ s, l }) => l && s.quotationLine.unit && !sameUnit(s.quotationLine.unit, l.unit));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errs = group.selections.map((s) => decimalError(qty[s.quotationLineId] ?? '', { required: true, positive: true, scale: 3 }));
@@ -393,14 +438,26 @@ function CreatePoDialog({ open, onOpenChange, rfq, group }: { open: boolean; onO
             })}
           </tbody>
         </table>
+        {unitWarnings.length > 0 && (
+          <Callout tone="warn" title="Unité du devis différente de la RFQ">
+            {unitWarnings.map(({ s, l }) => `Ligne ${l!.lineNo} : devis en « ${s.quotationLine.unit} », BC en « ${l!.unit} »`).join(' ; ')}. Le BC est établi dans l’unité de la RFQ au prix
+            unitaire du devis : vérifiez la quantité et le prix avant de créer le BC.
+          </Callout>
+        )}
+        {discount && (
+          <Callout tone="warn" title="Remise du devis non reportée">
+            Le devis comporte une remise de {fmtMoney(discount, group.currency)} que le BC ne sait pas porter : intégrez-la dans les prix unitaires ou ajustez fret et taxes, sinon le
+            total du BC dépassera celui du devis.
+          </Callout>
+        )}
         <div className="grid gap-3 md:grid-cols-3">
           <FormField label="Livraison attendue">
             <Input type="date" value={h.expectedDeliveryDate} onChange={(e) => setH((x) => ({ ...x, expectedDeliveryDate: e.target.value }))} />
           </FormField>
-          <FormField label="Taxes" error={decimalError(h.taxAmount, { scale: 2 }) ?? undefined}>
+          <FormField label="Taxes" error={decimalError(h.taxAmount, { scale: 2 }) ?? undefined} hint={firstOrder && quote?.taxAmount && dec.gt0(quote.taxAmount) ? 'Repris du devis' : undefined}>
             <DecimalInput value={h.taxAmount} onChange={(v) => setH((x) => ({ ...x, taxAmount: v }))} placeholder="0,00" />
           </FormField>
-          <FormField label="Fret" error={decimalError(h.freightAmount, { scale: 2 }) ?? undefined}>
+          <FormField label="Fret" error={decimalError(h.freightAmount, { scale: 2 }) ?? undefined} hint={firstOrder && quote?.freightAmount && dec.gt0(quote.freightAmount) ? 'Repris du devis' : undefined}>
             <DecimalInput value={h.freightAmount} onChange={(v) => setH((x) => ({ ...x, freightAmount: v }))} placeholder="0,00" />
           </FormField>
           <FormField label="Port de livraison">
@@ -553,7 +610,15 @@ export function SelectionsTab({ rfq }: { rfq: RfqDetail }) {
         confirmLabel="Retirer"
         onConfirm={(reason) => run(() => api.post(`/rfqs/${rfq.id}/selections/${withdrawing!.id}/withdraw`, { reason }), 'Sélection retirée')}
       />
-      {creating && <CreatePoDialog open={!!creating} onOpenChange={(o) => !o && setCreating(null)} rfq={rfq} group={creating} />}
+      {creating && (
+        <CreatePoDialog
+          open={!!creating}
+          onOpenChange={(o) => !o && setCreating(null)}
+          rfq={rfq}
+          group={creating}
+          firstOrder={!(orders.data ?? []).some((o) => o.quotationId === creating.quotationId && o.status !== 'CANCELLED')}
+        />
+      )}
     </div>
   );
 }

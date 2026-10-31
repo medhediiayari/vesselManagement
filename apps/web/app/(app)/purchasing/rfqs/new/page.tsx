@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/field';
 import { PageHeader, Panel } from '@/components/ui/page';
 import { Forbidden, LoadingBlock } from '@/components/ui/states';
-import { commandError, dec, decimalError, purKeys, toApiDecimal, usePurRefresh } from '@/components/purchasing/lib';
+import { commandError, dec, decimalError, purKeys, toApiDecimal, todayInput, usePurRefresh } from '@/components/purchasing/lib';
 import type { PrDetail, PrListItem, RfqDetail } from '@/components/purchasing/types';
 import { Callout, DecimalInput, FormField, PrStatusBadge, SupplierMultiPicker, VesselSelect } from '@/components/purchasing/ui';
 
@@ -263,7 +263,7 @@ function NewRfq() {
                 <Input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={300} />
               </FormField>
               <FormField label="Date limite de réponse">
-                <Input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+                <Input type="date" value={deadline} min={todayInput()} onChange={(e) => setDeadline(e.target.value)} />
               </FormField>
               <FormField label="Port de livraison">
                 <Input value={deliveryPort} onChange={(e) => setDeliveryPort(e.target.value)} maxLength={120} />

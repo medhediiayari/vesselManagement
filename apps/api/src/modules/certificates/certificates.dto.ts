@@ -70,6 +70,8 @@ export const CreateCertificateSchema = z
     changeNote,
     /** Soumettre immédiatement à approbation (sinon brouillon) */
     submit: z.boolean().default(false),
+    /** Dossier de classement de l'arborescence (exige certificates.folders.manage) */
+    folderId: uuid.nullable().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.subjectKind === 'VESSEL' && (!v.vesselId || v.memberId)) {
@@ -165,6 +167,34 @@ export class SetRenewalDto extends createZodDto(
 
 export class AddCommentDto extends createZodDto(z.object({ body: z.string().trim().min(1).max(4000) })) {}
 
+// =============================================================================
+// Arborescence : dossiers de classement et catégories
+// =============================================================================
+
+const folderName = z.string().trim().min(1, 'Nom du dossier requis').max(120);
+const categoryName = z.string().trim().min(2, 'Nom de catégorie : 2 caractères minimum').max(60);
+
+export class CreateFolderDto extends createZodDto(z.object({ name: folderName, parentId: uuid.nullable().optional() })) {}
+
+export class UpdateFolderDto extends createZodDto(
+  z
+    .object({ name: folderName.optional(), parentId: uuid.nullable().optional(), sortOrder: z.number().int().min(0).max(100_000).optional() })
+    .strict(),
+) {}
+
+/** Classement d'un ou plusieurs certificats (null = retirer du dossier). */
+export class FileCertificatesDto extends createZodDto(
+  z.object({ certificateIds: z.array(uuid).min(1).max(200), folderId: uuid.nullable() }),
+) {}
+
+export class CreateCategoryDto extends createZodDto(z.object({ name: categoryName })) {}
+
+export class UpdateCategoryDto extends createZodDto(
+  z.object({ name: categoryName.optional(), sortOrder: z.number().int().min(0).max(100_000).optional() }).strict(),
+) {}
+
+export class ApproversQuery extends createZodDto(z.object({ kind: z.enum(['CREATE', 'RENEWAL', 'CORRECTION']).default('RENEWAL') })) {}
+
 export class ArchiveCertificateDto extends createZodDto(
   z.object({ reason: z.string().trim().min(3, "Motif d'archivage obligatoire").max(500) }),
 ) {}
@@ -189,6 +219,8 @@ export const ListCertificatesSchema = PaginationSchema.extend({
   crewVesselId: uuid.optional(),
   typeId: uuid.optional(),
   category: z.string().trim().max(60).optional(),
+  /** Dossier de l'arborescence (sous-dossiers inclus) ; "none" = certificats non classés */
+  folderId: z.union([uuid, z.literal('none')]).optional(),
   validity: csvEnum(VALIDITY_STATUSES),
   expiringWithinDays: z.coerce.number().int().min(0).max(3650).optional(),
   renewalStatus: renewalStatus.optional(),
@@ -199,7 +231,8 @@ export const ListCertificatesSchema = PaginationSchema.extend({
   /** Inclure les certificats sans révision ni demande ouverte (création refusée / annulée) */
   includeAbandoned: queryBool,
   search: z.string().trim().max(100).optional(),
-  sort: z.enum(['expiryOn', 'updatedAt', 'createdAt']).default('expiryOn'),
+  /** upcoming : à échoir d'abord, puis expirés récents, puis sans date (`order` ignoré) */
+  sort: z.enum(['expiryOn', 'upcoming', 'updatedAt', 'createdAt']).default('expiryOn'),
   order: z.enum(['asc', 'desc']).default('asc'),
 });
 export class ListCertificatesQuery extends createZodDto(ListCertificatesSchema) {}

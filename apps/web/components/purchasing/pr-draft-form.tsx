@@ -253,7 +253,8 @@ export function rowErrors(r: EditorRow): Partial<Record<Col, string>> {
   if (isEmptyRow(r)) return {};
   const e: Partial<Record<Col, string>> = {};
   if (!r.designation.trim()) e.designation = 'Désignation obligatoire';
-  const q = decimalError(r.quantityRequested, { required: true, positive: true, scale: 3 });
+  // Quantité négative : message explicite plutôt que « nombre décimal attendu » (UI-09)
+  const q = r.quantityRequested.trim().startsWith('-') ? 'Quantité > 0' : decimalError(r.quantityRequested, { required: true, positive: true, scale: 3 });
   if (q) e.quantityRequested = q;
   if (!r.unit.trim()) e.unit = 'Unité obligatoire';
   return e;
@@ -304,6 +305,8 @@ const HEADERS: Record<Col, { label: string; className: string; required?: boolea
 export function PrLineEditor({ rows, onChange, disabled }: { rows: EditorRow[]; onChange: (rows: EditorRow[]) => void; disabled?: boolean }) {
   const refs = useRef(new Map<string, HTMLInputElement>());
   const unitsId = useId();
+  const errId = useId();
+  const errorRows = rows.map((r, i) => ({ i, errors: rowErrors(r) })).filter((x) => Object.keys(x.errors).length > 0);
   const focus = useCallback((rowIndex: number, col: Col) => {
     setTimeout(() => refs.current.get(`${rowIndex}:${col}`)?.focus(), 20);
   }, []);
@@ -389,6 +392,7 @@ export function PrLineEditor({ rows, onChange, disabled }: { rows: EditorRow[]; 
         invalid={!!errors[col]}
         title={errors[col]}
         aria-label={`Ligne ${i + 1} — ${HEADERS[col].label}`}
+        aria-describedby={errors[col] ? `${errId}-${i}` : undefined}
         list={col === 'unit' ? unitsId : undefined}
         inputMode={isNum ? 'decimal' : undefined}
         maxLength={col === 'designation' ? 500 : col === 'remarks' ? 1000 : col === 'unit' ? 32 : col === 'rob' ? 64 : 200}
@@ -404,7 +408,8 @@ export function PrLineEditor({ rows, onChange, disabled }: { rows: EditorRow[]; 
           <option key={u} value={u} />
         ))}
       </datalist>
-      <div className="overflow-x-auto rounded-md border border-line-strong">
+      {/* relative : le libellé sr-only positionné en absolu reste rogné par la zone défilante (UI-01, mobile) */}
+      <div className="relative overflow-x-auto rounded-md border border-line-strong">
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="bg-surface-sunken text-xs text-ink-muted">
@@ -468,6 +473,15 @@ export function PrLineEditor({ rows, onChange, disabled }: { rows: EditorRow[]; 
           </tbody>
         </table>
       </div>
+      {errorRows.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs text-danger" aria-live="polite">
+          {errorRows.map(({ i, errors }) => (
+            <li key={rows[i].key} id={`${errId}-${i}`}>
+              Ligne {i + 1} : {COLS.filter((c) => errors[c]).map((c) => `${HEADERS[c].label} — ${errors[c]}`).join(' · ')}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
         <Button
           variant="secondary"
@@ -480,7 +494,7 @@ export function PrLineEditor({ rows, onChange, disabled }: { rows: EditorRow[]; 
         >
           <Plus className="h-4 w-4" aria-hidden /> Ajouter une ligne
         </Button>
-        <p className="flex items-center gap-1.5 text-xs text-ink-muted">
+        <p className="hidden items-center gap-1.5 text-xs text-ink-muted sm:flex">
           <Keyboard className="h-3.5 w-3.5" aria-hidden />
           Entrée : ligne suivante · ↑/↓ : naviguer · Ctrl+Suppr : supprimer · coller depuis Excel remplit plusieurs lignes. Unités libres (pcs, L, bidon…).
         </p>

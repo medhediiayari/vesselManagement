@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Field, Input, Select, Textarea } from '@/components/ui/field';
 import { CustomFieldInput, type FieldValue } from './custom-fields';
-import { titleFromFileName, useCategoriesFor, useCategoryFields, useCsoRun } from './lib';
+import { titleFromFileName, useCategoriesFor, useCategoryFields, useCsoRun, versionOutcome } from './lib';
 import type { CsoDocumentDetail, CsoLibrary, CsoVersion } from './types';
 import { Notice } from './ui';
 
@@ -29,7 +29,8 @@ function UploadedFile({ file, onReplace }: { file: StoredFileDto; onReplace: () 
   );
 }
 
-function SubmitChoice({ submit, onChange }: { submit: boolean; onChange: (v: boolean) => void }) {
+/** `direct` : profil `cso.self_approve`, qui publie sans validateur (CSO-04). */
+function SubmitChoice({ submit, onChange, direct }: { submit: boolean; onChange: (v: boolean) => void; direct: boolean }) {
   return (
     <fieldset>
       <legend className="field-label">Après enregistrement</legend>
@@ -37,8 +38,12 @@ function SubmitChoice({ submit, onChange }: { submit: boolean; onChange: (v: boo
         <label className="flex items-start gap-2 text-sm">
           <input type="radio" name="cso-submit" className="mt-0.5 h-4 w-4" checked={submit} onChange={() => onChange(true)} />
           <span>
-            <span className="font-medium">Soumettre pour approbation</span>
-            <span className="block text-xs text-ink-muted">Un validateur désigné (autre que vous) devra approuver avant publication.</span>
+            <span className="font-medium">{direct ? 'Publier directement' : 'Soumettre pour approbation'}</span>
+            <span className="block text-xs text-ink-muted">
+              {direct
+                ? 'Votre profil publie sans approbation si vous avez le droit d’approuver dans ce dossier ; sinon la version est soumise aux validateurs.'
+                : 'Un validateur désigné (autre que vous) devra approuver avant publication.'}
+            </span>
           </span>
         </label>
         <label className="flex items-start gap-2 text-sm">
@@ -94,6 +99,7 @@ export function CreateDocumentDialog({
   const required = useMemo(() => new Set(category?.requiredFields ?? []), [category]);
   const manualRef = !category || category.referenceMode === 'MANUAL';
   const canEditFields = can('cso.fields.edit');
+  const direct = can('cso.self_approve');
   const activeFields = useMemo(() => (fields.data ?? []).filter((f) => !f.archived), [fields.data]);
 
   useEffect(() => {
@@ -145,7 +151,12 @@ export function CreateDocumentDialog({
             submit,
             customFields: canEditFields && Object.keys(customFields).length ? customFields : undefined,
           }),
-        (d) => (submit ? `Document « ${d.title} » créé — version soumise pour approbation` : `Document « ${d.title} » créé en brouillon`),
+        (d) =>
+          d.status === 'PUBLISHED'
+            ? `Document « ${d.title} » créé et publié directement`
+            : d.pendingVersion?.status === 'PENDING_APPROVAL'
+              ? `Document « ${d.title} » créé — version soumise pour approbation`
+              : `Document « ${d.title} » créé en brouillon`,
       );
       onOpenChange(false);
       onCreated?.(doc);
@@ -161,7 +172,11 @@ export function CreateDocumentDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Nouveau document"
-      description={`Dans « ${folder.name} » — la première version suit le circuit d'approbation avant publication.`}
+      description={
+        direct
+          ? `Dans « ${folder.name} » — la première version peut être publiée directement avec votre profil.`
+          : `Dans « ${folder.name} » — la première version suit le circuit d'approbation avant publication.`
+      }
       size="lg"
       footer={
         <>
@@ -170,7 +185,7 @@ export function CreateDocumentDialog({
             Annuler
           </Button>
           <Button onClick={save} loading={busy} disabled={missing.length > 0}>
-            {submit ? 'Créer et soumettre' : 'Créer le brouillon'}
+            {submit ? (direct ? 'Créer et publier' : 'Créer et soumettre') : 'Créer le brouillon'}
           </Button>
         </>
       }
@@ -250,7 +265,7 @@ export function CreateDocumentDialog({
           <Input id={ids.note} value={changeNote} onChange={(e) => setChangeNote(e.target.value)} maxLength={1000} />
         </Field>
         <div className="sm:col-span-2">
-          <SubmitChoice submit={submit} onChange={setSubmit} />
+          <SubmitChoice submit={submit} onChange={setSubmit} direct={direct} />
         </div>
         {error && (
           <div className="sm:col-span-2">
@@ -265,6 +280,7 @@ export function CreateDocumentDialog({
 /** Nouvelle version : l'officielle actuelle reste publiée tant que la nouvelle n'est pas approuvée (CSO-007). */
 export function NewVersionDialog({ open, onOpenChange, doc }: { open: boolean; onOpenChange: (o: boolean) => void; doc: Pick<CsoDocumentDetail, 'id' | 'title' | 'vesselId' | 'currentVersion'> }) {
   const run = useCsoRun();
+  const direct = useSession().can('cso.self_approve');
   const noteId = useId();
   const [file, setFile] = useState<StoredFileDto | null>(null);
   const [changeNote, setChangeNote] = useState('');
@@ -303,7 +319,7 @@ export function NewVersionDialog({ open, onOpenChange, doc }: { open: boolean; o
               try {
                 await run(
                   () => api.post<CsoVersion>(`/cso/documents/${doc.id}/versions`, { fileId: file.id, changeNote: changeNote.trim() || undefined, submit }),
-                  (v) => `Version ${v.versionNo} ${submit ? 'soumise pour approbation' : 'enregistrée en brouillon'}`,
+                  (v) => `Version ${v.versionNo} ${versionOutcome(v.status)}`,
                 );
                 onOpenChange(false);
               } catch (e) {
@@ -313,7 +329,7 @@ export function NewVersionDialog({ open, onOpenChange, doc }: { open: boolean; o
               }
             }}
           >
-            {submit ? 'Déposer et soumettre' : 'Déposer en brouillon'}
+            {submit ? (direct ? 'Déposer et publier' : 'Déposer et soumettre') : 'Déposer en brouillon'}
           </Button>
         </>
       }
@@ -330,7 +346,7 @@ export function NewVersionDialog({ open, onOpenChange, doc }: { open: boolean; o
         <Field label="Note de version" htmlFor={noteId} hint="Ce qui change par rapport à la version précédente.">
           <Textarea id={noteId} rows={2} value={changeNote} onChange={(e) => setChangeNote(e.target.value)} maxLength={1000} />
         </Field>
-        <SubmitChoice submit={submit} onChange={setSubmit} />
+        <SubmitChoice submit={submit} onChange={setSubmit} direct={direct} />
         {error && <Notice tone="danger">{error}</Notice>}
       </div>
     </Dialog>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { Building2, Plus, Search, ShieldCheck, UserRound, X } from 'lucide-react';
+import { AlertTriangle, Building2, Plus, Search, ShieldCheck, UserRound, X } from 'lucide-react';
 import { useId, useState, type ReactNode } from 'react';
 import { ApiError, api, errorMessage, type Page } from '@/lib/api';
 import { cn } from '@/lib/format';
@@ -279,13 +279,25 @@ const PRINCIPAL_ICON: Record<PrincipalType, ReactNode> = {
   DEPARTMENT: <Building2 className="h-3.5 w-3.5" aria-hidden />,
 };
 
-export function PrincipalChip({ p, onRemove }: { p: PrincipalDto; onRemove?: () => void }) {
+/** `warning` : principal signalé (ex. validateur sans droit d'approbation — CRT-02). */
+export function PrincipalChip({ p, onRemove, warning }: { p: PrincipalDto; onRemove?: () => void; warning?: string }) {
   const label = p.label ?? 'Principal inconnu';
   return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-line-strong bg-white px-2 py-0.5 text-xs">
+    <span
+      className={cn(
+        'inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs',
+        warning ? 'border-warn-line bg-warn-bg' : 'border-line-strong bg-white',
+      )}
+      title={warning}
+    >
       <span className="text-teal-700">{PRINCIPAL_ICON[p.principalType]}</span>
       <span className="text-ink-muted">{PRINCIPAL_TYPE_LABELS[p.principalType]} :</span>
       <span className="truncate font-medium text-ink">{label}</span>
+      {warning && (
+        <span className="inline-flex shrink-0 items-center gap-0.5 font-medium text-warn">
+          <AlertTriangle className="h-3 w-3" aria-hidden /> {warning}
+        </span>
+      )}
       {onRemove && (
         <button type="button" onClick={onRemove} className="rounded-full p-0.5 text-ink-muted hover:bg-navy-50 hover:text-ink" aria-label={`Retirer ${label}`}>
           <X className="h-3 w-3" aria-hidden />
@@ -306,11 +318,14 @@ export function PrincipalPicker({
   onChange,
   disabled,
   emptyHint,
+  warnings,
 }: {
   value: PrincipalDto[];
   onChange: (v: PrincipalDto[]) => void;
   disabled?: boolean;
   emptyHint?: ReactNode;
+  /** Avertissement par principal, clé `TYPE:id` */
+  warnings?: Map<string, string>;
 }) {
   const [type, setType] = useState<PrincipalType>('ROLE');
   const [choice, setChoice] = useState('');
@@ -339,6 +354,7 @@ export function PrincipalPicker({
           <PrincipalChip
             key={`${p.principalType}:${p.principalId}`}
             p={p}
+            warning={warnings?.get(`${p.principalType}:${p.principalId}`)}
             onRemove={disabled ? undefined : () => onChange(value.filter((x) => !(x.principalType === p.principalType && x.principalId === p.principalId)))}
           />
         ))}

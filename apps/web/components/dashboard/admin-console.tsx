@@ -107,7 +107,7 @@ export function AdminConsole({ admin }: { admin: AdminOverview }) {
               <>
                 <Register>
                   <RegisterRow label="Comptes actifs" value={users.active} href="/admin/users?status=ACTIVE" />
-                  <RegisterRow label="Comptes verrouillés" hint="Après 5 échecs de connexion" value={users.locked} tone="danger" href="/admin/users?status=LOCKED" />
+                  <RegisterRow label="Comptes verrouillés" hint={users.maxFailedLogins ? `Après ${users.maxFailedLogins} échecs de connexion` : 'Après plusieurs échecs de connexion'} value={users.locked} tone="danger" href="/admin/users?status=LOCKED" />
                   <RegisterRow label="Comptes désactivés" value={users.deactivated} href="/admin/users?status=DEACTIVATED" />
                 </Register>
                 {users.lockedList.length > 0 && (

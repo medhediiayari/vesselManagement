@@ -63,7 +63,7 @@ export function RestoreFolderDialog({ open, onOpenChange, folder }: { open: bool
   });
   const groups = scopeFolders.map((f, i) => ({
     folder: f,
-    docs: (docs[i]?.data?.items ?? []).filter((d) => d.status === 'ARCHIVED' && d.actions?.includes('restore')),
+    docs: (docs[i]?.data?.items ?? []).filter((d) => d.status === 'ARCHIVED' && d.actions?.includes('restore') && !!d.restoreMode),
   }));
   const loadingDocs = subtree.isLoading || docs.some((d) => d.isLoading);
 
@@ -72,7 +72,7 @@ export function RestoreFolderDialog({ open, onOpenChange, folder }: { open: bool
       open={open}
       onOpenChange={onOpenChange}
       title={`Restaurer « ${folder.name} »`}
-      description="Les documents restaurés repassent par une nouvelle approbation avant d'être republiés."
+      description="Les documents déjà approuvés repassent par une nouvelle approbation avant d'être republiés ; ceux qui ne l'ont jamais été reviennent en brouillon avec leur dernier fichier."
       size="md"
       footer={
         <>
@@ -88,13 +88,13 @@ export function RestoreFolderDialog({ open, onOpenChange, folder }: { open: bool
               try {
                 await run(
                   () =>
-                    api.post<{ foldersRestored: number; documentsRestored: number; documentsLeftArchived: number }>(`/cso/folders/${folder.id}/restore`, {
+                    api.post<{ foldersRestored: number; documentsRestored: number; documentsRestoredAsDraft: number; documentsLeftArchived: number }>(`/cso/folders/${folder.id}/restore`, {
                       recursive,
                       includeDocumentIds: selective ? [...selected] : undefined,
                       reason: reason.trim(),
                     }),
                   (r) =>
-                    `${r.foldersRestored} dossier(s) restauré(s) ; ${r.documentsRestored} document(s) en attente de nouvelle approbation${r.documentsLeftArchived ? ` ; ${r.documentsLeftArchived} resté(s) archivé(s)` : ''}`,
+                    `${r.foldersRestored} dossier(s) restauré(s) ; ${r.documentsRestored - r.documentsRestoredAsDraft} document(s) en attente de nouvelle approbation${r.documentsRestoredAsDraft ? ` ; ${r.documentsRestoredAsDraft} jamais approuvé(s) revenu(s) en brouillon` : ''}${r.documentsLeftArchived ? ` ; ${r.documentsLeftArchived} resté(s) archivé(s)` : ''}`,
                 );
                 onOpenChange(false);
               } catch (e) {
@@ -153,6 +153,7 @@ export function RestoreFolderDialog({ open, onOpenChange, folder }: { open: bool
                             />
                             <span className="min-w-0 flex-1 truncate">{d.title}</span>
                             <Reference value={d.reference} />
+                            {d.restoreMode === 'DRAFT' && <span className="text-xs text-ink-muted">brouillon</span>}
                           </label>
                         </li>
                       ))}

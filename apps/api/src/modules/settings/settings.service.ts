@@ -11,10 +11,17 @@ export const SETTINGS_SCHEMAS = {
   'auth.sessionIdleTimeoutMinutes': z.number().int().min(5).max(24 * 60),
   'auth.maxFailedLogins': z.number().int().min(3).max(10),
   'auth.passwordMinLength': z.number().int().min(10).max(128),
-  'members.selfEditableFields': z.array(
-    z.enum(['email', 'phone', 'address', 'emergencyContactName', 'emergencyContactPhone']),
-  ),
-  'files.maxUploadBytes': z.number().int().min(1024 * 1024).max(500 * 1024 * 1024),
+  'members.selfEditableFields': z
+    .array(z.enum(['email', 'phone', 'address', 'emergencyContactName', 'emergencyContactPhone']))
+    .refine((v) => new Set(v).size === v.length, 'Chaque champ ne peut figurer qu’une fois'), // ADM-29
+  // Plafonnée par la limite Multer (UPLOAD_MAX_BYTES) : au-delà, la valeur n'aurait aucun effet (ADM-20)
+  'files.maxUploadBytes': z
+    .number()
+    .int()
+    .min(1024 * 1024)
+    .refine((v) => v <= env().UPLOAD_MAX_BYTES, () => ({
+      message: `Au plus ${Math.floor(env().UPLOAD_MAX_BYTES / (1024 * 1024))} Mo (limite serveur fixée par l'environnement)`,
+    })),
   'certificates.expiringSoonDays': z.number().int().min(1).max(365),
   'purchasing.allowOverAllocation': z.boolean(),
 } as const;
@@ -53,6 +60,11 @@ export class SettingsService {
     }
     this.cache.set(key, { value, at: Date.now() });
     return value;
+  }
+
+  /** Bornes dépendant de l'environnement, affichées dans l'écran Paramètres. */
+  limits() {
+    return { 'files.maxUploadBytes': { max: env().UPLOAD_MAX_BYTES } };
   }
 
   async all(): Promise<Record<string, unknown>> {

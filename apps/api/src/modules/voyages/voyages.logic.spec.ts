@@ -3,28 +3,36 @@ import {
   CpVersionState,
   VOYAGE_COMMANDS,
   VOYAGE_TRANSITIONS,
+  assignmentCoversVoyage,
   buildCpClauses,
   buildNoticeEmailDraft,
   canCompleteTask,
   canTransitionNotice,
   canTransitionVoyage,
+  cargoQuantityWarnings,
   charterPartyCandidates,
+  cpReferenceKey,
   checkCharterPartyRequirement,
   clausesToCpData,
   diffClauses,
   flagCertificate,
   isVoyageClosed,
+  normalizeCpReference,
   normalizeParty,
   opposableVersion,
   pickScheduleDetails,
   planCpApproval,
+  scheduleChangeLabel,
   sortTimeline,
   stripCharterPartyReferences,
   validateCargoQuantities,
   validateNewCpVersion,
   validatePortOrder,
   validatePortTimes,
+  validateActualTimesNotFuture,
+  validateVoyageTimes,
   voyageEndDate,
+  voyageStartDate,
 } from './voyages.logic';
 
 const d = (s: string) => new Date(s.length === 10 ? `${s}T00:00:00.000Z` : s);
@@ -235,6 +243,31 @@ describe('Escales, cargaisons, tâches', () => {
 describe('Contrôle informatif des certificats (CDC §7.4)', () => {
   const today = d('2026-04-10T10:00:00Z');
 
+  it('détermine le début estimé du voyage', () => {
+    expect(voyageStartDate({ atd: null, etd: d('2026-04-12'), laycanFrom: d('2026-04-10') }, [])).toEqual(d('2026-04-12'));
+    expect(voyageStartDate({ atd: null, etd: null, laycanFrom: d('2026-04-10') }, [{ eta: d('2026-04-11'), etd: d('2026-04-13'), ata: null, atd: null }])).toEqual(d('2026-04-11'));
+    expect(voyageStartDate({ atd: null, etd: null, laycanFrom: null }, [])).toBeNull();
+  });
+
+  it('retient les marins à bord pendant le voyage', () => {
+    const base = { plannedJoinDate: null, actualJoinDate: null, plannedSignOffDate: null, actualSignOffDate: null };
+    const start = d('2026-05-01');
+    const end = d('2026-05-20');
+    // À bord depuis avril, sans débarquement prévu : couvre le voyage
+    expect(assignmentCoversVoyage({ ...base, status: 'ONBOARD', actualJoinDate: d('2026-04-01') }, start, end)).toBe(true);
+    // Embarquement prévu après la fin du voyage : non
+    expect(assignmentCoversVoyage({ ...base, status: 'PLANNED', plannedJoinDate: d('2026-06-01') }, start, end)).toBe(false);
+    // Débarquement prévu avant le départ : non ; le jour même du départ : oui
+    expect(assignmentCoversVoyage({ ...base, status: 'ONBOARD', actualJoinDate: d('2026-01-01'), plannedSignOffDate: d('2026-04-30') }, start, end)).toBe(false);
+    expect(assignmentCoversVoyage({ ...base, status: 'ONBOARD', actualJoinDate: d('2026-01-01'), plannedSignOffDate: d('2026-05-01') }, d('2026-05-01T08:00:00Z'), end)).toBe(true);
+    // Terminée pendant le voyage : oui ; terminée sans date de débarquement (reprise) : non ; annulée : non
+    expect(assignmentCoversVoyage({ ...base, status: 'COMPLETED', actualJoinDate: d('2026-03-01'), actualSignOffDate: d('2026-05-10') }, start, end)).toBe(true);
+    expect(assignmentCoversVoyage({ ...base, status: 'COMPLETED', actualJoinDate: d('2026-03-01') }, start, end)).toBe(false);
+    expect(assignmentCoversVoyage({ ...base, status: 'CANCELLED', plannedJoinDate: d('2026-05-02') }, start, end)).toBe(false);
+    // Voyage sans dates : toute affectation ouverte compte
+    expect(assignmentCoversVoyage({ ...base, status: 'PLANNED', plannedJoinDate: d('2027-01-01') }, null, null)).toBe(true);
+  });
+
   it('détermine la fin estimée du voyage', () => {
     expect(voyageEndDate({ ata: null, eta: d('2026-05-02'), laycanTo: d('2026-04-25') }, [])).toEqual(d('2026-05-02'));
     expect(voyageEndDate({ ata: null, eta: null, laycanTo: d('2026-04-25') }, [{ eta: d('2026-05-05'), etd: null, ata: null, atd: null }])).toEqual(d('2026-05-05'));
@@ -284,5 +317,43 @@ describe('Timeline', () => {
       { at: new Date('invalid'), kind: 'x', label: 'x' },
     ]);
     expect(t.map((e) => e.kind)).toEqual(['voyage.created', 'port.arrival']);
+  });
+});
+
+describe('Cohérence des dates du voyage (audit FLT-06)', () => {
+  const now = d('2026-10-30T12:00:00Z');
+  it('départ avant arrivée, prévu et réel', () => {
+    expect(validateVoyageTimes({ etd: d('2026-10-01T08:00:00Z'), eta: d('2026-10-05T08:00:00Z') })).toBeNull();
+    expect(validateVoyageTimes({ etd: d('2026-10-05T08:00:00Z'), eta: d('2026-10-01T08:00:00Z') })).toMatch(/ETA/);
+    expect(validateVoyageTimes({ atd: d('2026-10-05T08:00:00Z'), ata: d('2026-10-01T08:00:00Z') })).toMatch(/ATA/);
+  });
+
+  it('date réelle future refusée au-delà de 24 h', () => {
+    expect(validateActualTimesNotFuture({ atd: d('2026-10-31T10:00:00Z') }, now)).toBeNull();
+    expect(validateActualTimesNotFuture({ atd: d('2026-11-02T10:00:00Z') }, now)).toMatch(/ATD/);
+    expect(validateActualTimesNotFuture({ ata: d('2027-01-01T00:00:00Z') }, now)).toMatch(/ATA/);
+  });
+});
+
+describe('Cargaison hors intervalle (audit FLT-19)', () => {
+  it('avertit sans bloquer', () => {
+    expect(cargoQuantityWarnings({ qtyMinMt: '1000', qtyMaxMt: '2000', qtyActualMt: '1500' })).toEqual([]);
+    expect(cargoQuantityWarnings({ qtyMinMt: '1000', qtyMaxMt: '2000', qtyActualMt: '90000' })[0]).toMatch(/supérieure au maximum/);
+    expect(cargoQuantityWarnings({ qtyMinMt: '1000', qtyMaxMt: '2000', qtyActualMt: '500', quantityOption: '10 % MOLOO' })[0]).toMatch(/MOLOO/);
+    expect(cargoQuantityWarnings({ qtyMaxMt: '2000' })).toEqual([]);
+  });
+});
+
+describe('Libellés de la chronologie (audit FLT-15)', () => {
+  it('traduit les champs de planning', () => {
+    expect(scheduleChangeLabel(['eta', 'laycanFrom', 'laycanTo'])).toBe('Planning mis à jour (ETA, début de laycan, fin de laycan)');
+  });
+});
+
+describe('Référence de Charter Party (audit FLT-16)', () => {
+  it('normalisée et comparée sans casse ni espaces', () => {
+    expect(normalizeCpReference('  audit-cp-001 ')).toBe('AUDIT-CP-001');
+    expect(normalizeCpReference('gencon   1994  a')).toBe('GENCON 1994 A');
+    expect(cpReferenceKey('AUDIT CP 001')).toBe(cpReferenceKey('audit cp001'));
   });
 });

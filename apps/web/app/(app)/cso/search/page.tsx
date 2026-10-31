@@ -18,7 +18,7 @@ function SearchView() {
       <CsoPageHeader
         section="search"
         title="Recherche CSO"
-        description="Recherche par nom, référence, description et métadonnées, strictement filtrée par vos droits documentaires et de champ."
+        description="Recherche par nom, référence, description et métadonnées (le contenu des fichiers n'est pas indexé), strictement filtrée par vos droits documentaires et de champ."
         breadcrumb={[{ label: 'Documents CSO', href: '/cso' }, { label: 'Recherche' }]}
       />
       <CsoSearch

@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { PaginationSchema } from '../../common/pagination';
+import { PaginationSchema, dateOnlyString } from '../../common/pagination';
 
 const uuid = z.string().uuid();
 
@@ -41,7 +41,8 @@ export class SetImportMappingDto extends createZodDto(
   }),
 ) {}
 
-const dateOrNull = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Format AAAA-MM-JJ').nullable().optional();
+// Jour existant exigé (30/02 refusé) : la chaîne est conservée telle quelle (audit FLT-03)
+const dateOrNull = dateOnlyString.nullable().optional();
 const textOrNull = (max: number) => z.string().trim().max(max).nullable().optional();
 const isoOrNull = z.string().trim().regex(/^[A-Za-z]{2}$/, 'Code pays ISO à 2 lettres').nullable().optional();
 

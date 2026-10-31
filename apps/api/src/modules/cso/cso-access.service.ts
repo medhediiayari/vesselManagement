@@ -196,7 +196,8 @@ export class CsoAccessService {
 
   /**
    * Charge un dossier et vérifie scope + visibilité + actions demandées.
-   * Les dossiers non visibles sont refusés sans divulguer leur contenu (403 ACL_DENIED).
+   * Un dossier invisible (hors scope ou ACL) répond 404 comme un dossier inexistant (CSO-13) :
+   * aucun moyen de vérifier qu'il existe. Les actions refusées sur un dossier visible restent en 403.
    */
   async assertFolder(
     ctx: AuthContext,
@@ -209,12 +210,9 @@ export class CsoAccessService {
     if (!folder) throw Errors.notFound('Dossier');
     const libs = await this.libraries(db);
     const library = libs.get(folder.libraryId)!;
-    if (!this.libraryInScope(ctx, library)) throw Errors.scopeDenied();
+    if (!this.libraryInScope(ctx, library)) throw Errors.notFound('Dossier');
     const eff = (await this.foldersAccess(ctx, [folder], db, libs)).get(folder.id)!;
-    if (!this.folderVisible(folder, eff)) {
-      if (!can(ctx, 'cso.view')) throw Errors.forbidden('Permission requise : cso.view', { permission: 'cso.view' });
-      throw Errors.aclDenied();
-    }
+    if (!this.folderVisible(folder, eff)) throw Errors.notFound('Dossier');
     this.assertActions(ctx, eff, actions);
     if (opts.requireActive && folder.status !== 'ACTIVE') throw Errors.invalidState('Dossier archivé : opération impossible');
     return { folder, library, eff };
@@ -234,14 +232,12 @@ export class CsoAccessService {
       db.csoLibrary.findUniqueOrThrow({ where: { id: doc.libraryId } }),
       db.csoFolder.findUniqueOrThrow({ where: { id: doc.folderId } }),
     ]);
-    if (!this.libraryInScope(ctx, library)) throw Errors.scopeDenied();
+    // Document invisible : 404, indiscernable d'un document inexistant (CSO-13)
+    if (!this.libraryInScope(ctx, library)) throw Errors.notFound('Document');
     const { eff, viaShare } = await this.documentsAccess(ctx, [doc], db);
     const e = eff.get(doc.id)!;
     const submitters = await this.inFlightSubmitters([doc.id], db);
-    if (!canSeeDocument(e, doc, ctx.userId, submitters.get(doc.id) ?? [])) {
-      if (!can(ctx, 'cso.view')) throw Errors.forbidden('Permission requise : cso.view', { permission: 'cso.view' });
-      throw Errors.aclDenied();
-    }
+    if (!canSeeDocument(e, doc, ctx.userId, submitters.get(doc.id) ?? [])) throw Errors.notFound('Document');
     this.assertActions(ctx, e, actions);
     if (opts.requireNotArchived && doc.status === 'ARCHIVED') throw Errors.invalidState('Document archivé : opération impossible');
     return { doc, folder, library, eff: e, viaShare: viaShare.has(doc.id) };

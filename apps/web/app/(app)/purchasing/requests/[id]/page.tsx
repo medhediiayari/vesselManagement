@@ -93,6 +93,8 @@ function PrDetailView() {
   // Counter-PR déjà appliquée alors que la PR est encore en discussion : il reste à valider ou diviser
   const countered = s === 'UNDER_REVIEW' && pr.currentRevisionNo > 0;
   const decide = can('pr.approve') && !isRequester;
+  // PR mère restée « Divisée » alors que toutes ses sous-PR sont terminées (avant correctif ACH-03)
+  const splitDone = s === 'SPLIT' && pr.children.length > 0 && pr.children.every((c) => ['CLOSED', 'CANCELLED', 'REJECTED'].includes(c.status));
 
   const post = (path: string, body: Record<string, unknown>, success: string) => run(() => api.post(`/purchase-requests/${pr.id}/${path}`, body), success);
 
@@ -124,7 +126,7 @@ function PrDetailView() {
           <PlayCircle className="h-4 w-4" aria-hidden /> Reprendre
         </Button>
       )}
-      {CLOSABLE.includes(s) && can('pr.approve') && (
+      {(CLOSABLE.includes(s) || splitDone) && can('pr.approve') && (
         <Button variant="ghost" onClick={() => setDialog('close')}>
           <Lock className="h-4 w-4" aria-hidden /> Clôturer
         </Button>
@@ -601,10 +603,12 @@ function PrDetailView() {
         description={
           s === 'RECEIVED'
             ? 'Toutes les lignes sont reçues.'
-            : 'La PR n’est pas entièrement reçue : la clôture manuelle est une décision documentée, les reliquats non reçus ne seront plus suivis.'
+            : splitDone
+              ? 'Toutes les sous-PR sont clôturées, annulées ou rejetées.'
+              : 'La PR n’est pas entièrement reçue : la clôture manuelle est une décision documentée, les reliquats non reçus ne seront plus suivis.'
         }
         label="Motif / décision"
-        required={s !== 'RECEIVED'}
+        required={s !== 'RECEIVED' && !splitDone}
         confirmLabel="Clôturer"
         onConfirm={(reason) => post('close', { expectedVersion: v, reason: reason || undefined }, 'PR clôturée')}
       />

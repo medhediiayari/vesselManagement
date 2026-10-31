@@ -13,7 +13,7 @@ import { ErrorState, LoadingBlock } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn, daysUntil, fmtDate, initials } from '@/lib/format';
 import { countryName, DelayBadge, DocStateBadge, documentState, type DocState } from './member-overview-lib';
-import { AssignmentStatusBadge, DepartmentLabel, MemberStatusBadge, daysBetween } from './member-ui';
+import { AssignmentStatusBadge, DepartmentLabel, MemberStatusBadge, missingSignOff, servedDays } from './member-ui';
 import { memberName, type MemberAssignment, type MemberDetail } from './types';
 
 const none = <span className="text-ink-soft">Non renseigné</span>;
@@ -158,29 +158,30 @@ function AlertList({ alerts }: { alerts: Alert[] }) {
 // -----------------------------------------------------------------------------
 
 /**
- * Synthèse du marin sélectionné (sous la liste, grand écran) : lecture seule, issue de GET /members/:id.
+ * Synthèse du marin sélectionné (grand écran) : lecture seule, issue de GET /members/:id.
+ * `side` : présentation en une colonne pour le panneau latéral fixe de la liste (audit UI-05).
  * Les certificats n'apparaissent qu'avec members.certificates.view ; les actions restent dans la fiche complète.
  */
-export function MemberSummary({ memberId, soonDays, onClose }: { memberId: string; soonDays: number; onClose: () => void }) {
+export function MemberSummary({ memberId, soonDays, onClose, side = false }: { memberId: string; soonDays: number; onClose: () => void; side?: boolean }) {
   const q = useQuery({ queryKey: ['member', memberId], queryFn: () => api.get<MemberDetail>(`/members/${memberId}`) });
   if (q.isLoading) {
     return (
-      <div className="panel mt-5">
+      <div className={side ? 'panel' : 'panel mt-5'}>
         <LoadingBlock rows={6} label="Chargement de la fiche…" />
       </div>
     );
   }
   if (q.error || !q.data) {
     return (
-      <div className="panel mt-5">
+      <div className={side ? 'panel' : 'panel mt-5'}>
         <ErrorState error={q.error} onRetry={() => q.refetch()} />
       </div>
     );
   }
-  return <SummaryBody m={q.data} soonDays={soonDays} onClose={onClose} />;
+  return <SummaryBody m={q.data} soonDays={soonDays} onClose={onClose} side={side} />;
 }
 
-function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: number; onClose: () => void }) {
+function SummaryBody({ m, soonDays, onClose, side }: { m: MemberDetail; soonDays: number; onClose: () => void; side: boolean }) {
   const name = memberName(m);
   const base = `/members/${m.id}`;
   const current = m.currentAssignments.find((a) => a.status === 'ONBOARD') ?? m.currentAssignments[0];
@@ -214,11 +215,11 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
     .slice(0, 4);
 
   return (
-    <section aria-label={`Synthèse de la fiche ${name}`} className="mt-5 space-y-5">
-      <div className="grid gap-5 xl:grid-cols-2 min-[1600px]:grid-cols-[minmax(0,2.3fr)_minmax(0,1fr)_minmax(0,1fr)]">
+    <section aria-label={`Synthèse de la fiche ${name}`} className={side ? 'space-y-4' : 'mt-5 space-y-5'}>
+      <div className={side ? 'grid gap-4' : 'grid gap-5 xl:grid-cols-2 min-[1600px]:grid-cols-[minmax(0,2.3fr)_minmax(0,1fr)_minmax(0,1fr)]'}>
         {/* Identité, affectation, pièces maritimes */}
-        <div className="panel relative p-4 xl:col-span-2 min-[1600px]:col-span-1">
-          <div className="absolute right-3 top-3 flex items-center gap-1">
+        <div className={cn('panel relative p-4', !side && 'xl:col-span-2 min-[1600px]:col-span-1')}>
+          <div className={side ? '-mt-1 mb-3 flex items-center justify-end gap-1' : 'absolute right-3 top-3 flex items-center gap-1'}>
             <Link href={base} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm font-medium text-action hover:bg-action-50">
               Fiche complète <ExternalLink className="h-3.5 w-3.5" aria-hidden />
             </Link>
@@ -226,20 +227,23 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
               <X className="h-4 w-4" />
             </IconButton>
           </div>
-          <div className="flex flex-col gap-5 sm:flex-row">
+          <div className={side ? 'flex flex-col gap-4' : 'flex flex-col gap-5 sm:flex-row'}>
             {m.photoFileId ? (
-              <SecureImage fileId={m.photoFileId} alt={`Photo de ${name}`} className="h-36 w-28 shrink-0 rounded-lg border border-line" />
+              <SecureImage fileId={m.photoFileId} alt={`Photo de ${name}`} className={cn('shrink-0 rounded-lg border border-line', side ? 'h-24 w-20' : 'h-36 w-28')} />
             ) : (
-              <span className="flex h-36 w-28 shrink-0 items-center justify-center rounded-lg bg-navy-50 text-2xl font-semibold text-navy-600" aria-hidden>
+              <span
+                className={cn('flex shrink-0 items-center justify-center rounded-lg bg-navy-50 font-semibold text-navy-600', side ? 'h-24 w-20 text-xl' : 'h-36 w-28 text-2xl')}
+                aria-hidden
+              >
                 {initials(name)}
               </span>
             )}
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2 sm:pr-48">
+              <div className={cn('flex flex-wrap items-center gap-2', !side && 'sm:pr-48')}>
                 <h2 className="text-xl font-semibold">{name}</h2>
                 <MemberStatusBadge status={m.status} />
               </div>
-              <div className="mt-3 grid gap-x-8 gap-y-4 lg:grid-cols-3">
+              <div className={side ? 'mt-3 grid gap-y-4' : 'mt-3 grid gap-x-8 gap-y-4 lg:grid-cols-3'}>
                 <Facts
                   items={[
                     ['Matricule', m.amcRef && <span className="ref">{m.amcRef}</span>],
@@ -355,7 +359,7 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
         </DashboardCard>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-2 min-[1600px]:grid-cols-3">
+      <div className={side ? 'grid gap-4' : 'grid gap-5 lg:grid-cols-2 min-[1600px]:grid-cols-3'}>
         <DashboardCard title="Prochaines échéances" meta="Certificats datés, passeport et seaman book" href={`${base}?tab=certificates`} linkLabel={`Toutes les échéances de ${name}`}>
           {deadlines.length === 0 ? (
             <p className="border-t border-line py-6 text-center text-sm text-ink-muted">Aucune échéance datée sur cette fiche.</p>
@@ -421,7 +425,7 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
                   {assignments.map((a) => {
                     const from = a.actualJoinDate ?? a.plannedJoinDate;
                     const to = a.actualSignOffDate ?? a.plannedSignOffDate;
-                    const end = a.actualSignOffDate ?? (a.status === 'ONBOARD' ? null : a.plannedSignOffDate);
+                    const days = servedDays(a);
                     return (
                       <tr key={a.id}>
                         <td className="max-w-[170px]">
@@ -440,7 +444,13 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
                           {!a.actualSignOffDate && to && <span className="block text-xs text-ink-muted">prévu</span>}
                         </td>
                         <td className="tabular whitespace-nowrap text-right text-sm">
-                          {a.actualJoinDate ? duration(daysBetween(a.actualJoinDate, end)) : <span className="text-ink-soft">—</span>}
+                          {days !== null ? (
+                            duration(days)
+                          ) : missingSignOff(a) ? (
+                            <span className="text-xs text-ink-soft">débarquement manquant</span>
+                          ) : (
+                            <span className="text-ink-soft">—</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -451,7 +461,7 @@ function SummaryBody({ m, soonDays, onClose }: { m: MemberDetail; soonDays: numb
           )}
         </DashboardCard>
 
-        <DashboardCard title="Points d’attention" meta="Déduits des certificats, pièces et affectations de la fiche" className="lg:col-span-2 min-[1600px]:col-span-1">
+        <DashboardCard title="Points d’attention" meta="Déduits des certificats, pièces et affectations de la fiche" className={side ? undefined : 'lg:col-span-2 min-[1600px]:col-span-1'}>
           <AlertList alerts={alerts} />
         </DashboardCard>
       </div>

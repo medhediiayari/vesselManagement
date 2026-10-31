@@ -7,7 +7,7 @@ import { Db, PrismaService } from '../../prisma/prisma.service';
 import { AccessService } from '../access/access.service';
 import { AuthContext, can, vesselWhere } from '../access/auth-context';
 import { AuditService } from '../audit/audit.service';
-import { CsoAction, grantedActions, pathIds, subtreeAllows } from './cso-acl.logic';
+import { CsoAction, breaksWithoutViewRule, grantedActions, pathIds, subtreeAllows } from './cso-acl.logic';
 import { CsoAccessService, OWNER_CSO_VERSION } from './cso-access.service';
 import { assertPrincipalsExist, isUniqueViolation, presentFolder, presentLibrary, principalLabels } from './cso-presenters';
 import { CsoWorkflowService } from './cso-workflow.service';
@@ -453,8 +453,9 @@ export class CsoFoldersService {
 
   /**
    * Restauration complète (recursive) ou sélective (includeDocumentIds) : les éléments non choisis
-   * restent archivés ; chaque document restauré repasse par une NOUVELLE approbation (version de
-   * restauration PENDING_APPROVAL) avant toute republication.
+   * restent archivés ; chaque document déjà approuvé repasse par une NOUVELLE approbation (version de
+   * restauration PENDING_APPROVAL) avant toute republication, un document jamais approuvé revient en
+   * brouillon (CSO-03).
    */
   async restore(ctx: AuthContext, id: string, dto: RestoreFolderDto) {
     const { folder, library } = await this.csoAccess.assertFolder(ctx, id, ['restore', 'view_archived']);
@@ -478,11 +479,11 @@ export class CsoFoldersService {
 
     const candidates = await this.prisma.csoDocument.findMany({ where: { folderId: { in: [...restored] }, status: 'ARCHIVED' } });
     const { eff: dEff } = await this.csoAccess.documentsAccess(ctx, candidates);
-    // Seuls les documents déjà approuvés au moins une fois sont restaurables (audit #10)
-    const restorable = await this.workflow.restorableIds(candidates.map((d) => d.id), this.prisma);
+    // Déjà approuvés : nouvelle approbation ; jamais approuvés : retour en brouillon (CSO-03, audit #10)
+    const modes = await this.workflow.restoreModes(candidates.map((d) => d.id), this.prisma);
     const eligible = candidates.filter((d) => {
       const e = dEff.get(d.id)!;
-      return e.view && e.view_archived && e.restore && restorable.has(d.id);
+      return e.view && e.view_archived && e.restore && modes.has(d.id);
     });
     let selected = eligible;
     if (dto.includeDocumentIds) {
@@ -531,13 +532,16 @@ export class CsoFoldersService {
       throw e;
     }
     for (const r of results) await this.workflow.notifyValidators(r.doc, r.version);
+    const asDraft = results.filter((r) => r.version.status === 'DRAFT');
     return {
       id: folder.id,
       status: 'ACTIVE',
       foldersRestored: restored.size,
       documentsRestored: results.length,
+      documentsRestoredAsDraft: asDraft.length,
       documentsLeftArchived: candidates.length - results.length,
-      pendingApprovalVersionIds: results.map((r) => r.version.id),
+      pendingApprovalVersionIds: results.filter((r) => r.version.status === 'PENDING_APPROVAL').map((r) => r.version.id),
+      draftVersionIds: asDraft.map((r) => r.version.id),
     };
   }
 
@@ -611,6 +615,12 @@ export class CsoFoldersService {
       merged.set(k, cur);
     }
     const entries = [...merged.values()].map((e) => ({ ...e, actions: [...e.actions].sort() }));
+    if (breaksWithoutViewRule(dto.inheritAcl, entries)) {
+      throw Errors.business(
+        'Rupture d’héritage refusée : ajoutez au moins une règle « Autoriser » sur l’action Consulter. Sans elle, tout titulaire de la permission de consultation CSO verrait cet élément.',
+        { field: 'entries' },
+      );
+    }
     await assertPrincipalsExist(this.prisma, entries);
 
     return this.prisma.$transaction(async (tx) => {

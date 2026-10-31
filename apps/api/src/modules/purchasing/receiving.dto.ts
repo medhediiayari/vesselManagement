@@ -2,14 +2,14 @@ import { DeliveryNoteStatus, ItemCondition, ReceiptStatus, VarianceStatus, Varia
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { PaginationSchema, dateOnly, isoCurrency } from '../../common/pagination';
-import { csvEnum, nonNegativeQty, optText, positiveQty, reqText, unitPrice, unitText, uuidList } from './purchasing.dto-helpers';
+import { csvEnum, nonNegativeQty, optText, pastOrTodayDate, positiveQty, reqText, unitPrice, unitText, uuidList } from './purchasing.dto-helpers';
 
 /** BL — ce que le fournisseur DÉCLARE livrer (jamais une preuve de réception physique, CDC §6.7). */
 export class CreateDeliveryNoteDto extends createZodDto(
   z.object({
     poId: z.string().uuid(),
     number: reqText(1, 80),
-    deliveryDate: dateOnly,
+    deliveryDate: pastOrTodayDate,
     /** Scan du BL (dépôt POST /files contexte PURCHASING) */
     fileId: z.string().uuid().nullable().optional(),
     notes: optText(5000),
@@ -33,7 +33,7 @@ export class OnboardDeliveryDto extends createZodDto(
     poId: z.string().uuid(),
     /** N° du BL fournisseur ; à défaut, une référence plateforme est attribuée */
     number: optText(80),
-    deliveryDate: dateOnly.optional(),
+    deliveryDate: pastOrTodayDate.optional(),
     allReceived: z.boolean().default(false),
     lines: z.array(z.object({ poLineId: z.string().uuid(), quantity: nonNegativeQty, remarks: optText(1000) })).max(500).default([]),
     extraItems: z

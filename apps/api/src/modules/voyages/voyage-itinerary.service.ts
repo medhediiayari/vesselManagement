@@ -13,7 +13,7 @@ import {
   UpdateCargoDto,
   UpdatePortDto,
 } from './voyages.dto';
-import { validateCargoQuantities, validatePortOrder, validatePortTimes } from './voyages.logic';
+import { cargoQuantityWarnings, validateActualTimesNotFuture, validateCargoQuantities, validatePortOrder, validatePortTimes } from './voyages.logic';
 import { VoyagesService } from './voyages.service';
 
 const PORT_TIME_FIELDS = ['eta', 'ata', 'etd', 'atd'] as const;
@@ -64,7 +64,7 @@ export class VoyageItineraryService {
   async addPort(ctx: AuthContext, voyageId: string, dto: CreatePortDto) {
     const v = await this.openVoyage(ctx, voyageId);
     await this.assertAgentOfVoyage(voyageId, dto.agentId);
-    const err = validatePortTimes(dto);
+    const err = validatePortTimes(dto) ?? validateActualTimesNotFuture(dto);
     if (err) throw Errors.validation(err);
     return this.prisma.$transaction(async (tx) => {
       const last = await tx.voyagePort.aggregate({ where: { voyageId }, _max: { sequence: true } });
@@ -90,7 +90,8 @@ export class VoyageItineraryService {
       ata: dto.ata !== undefined ? dto.ata : before.ata,
       atd: dto.atd !== undefined ? dto.atd : before.atd,
     };
-    const err = validatePortTimes(merged);
+    // Dates réelles futures contrôlées sur les seules valeurs envoyées (audit FLT-06)
+    const err = validatePortTimes(merged) ?? validateActualTimesNotFuture({ ata: dto.ata, atd: dto.atd });
     if (err) throw Errors.validation(err);
     return this.prisma.$transaction(async (tx) => {
       const after = await tx.voyagePort.update({ where: { id: portId }, data: dto as Prisma.VoyagePortUncheckedUpdateInput });
@@ -228,7 +229,8 @@ export class VoyageItineraryService {
 
   async listCargo(ctx: AuthContext, voyageId: string) {
     await this.voyages.getAccessible(ctx, voyageId);
-    return this.prisma.cargo.findMany({ where: { voyageId }, orderBy: { commodity: 'asc' } });
+    const rows = await this.prisma.cargo.findMany({ where: { voyageId }, orderBy: { commodity: 'asc' } });
+    return rows.map((c) => ({ ...c, warnings: cargoQuantityWarnings(c) }));
   }
 
   async addCargo(ctx: AuthContext, voyageId: string, dto: CreateCargoDto) {
@@ -242,7 +244,7 @@ export class VoyageItineraryService {
         { action: 'voyage.cargo_added', module: 'voyages', entityType: 'cargo', entityId: cargo.id, vesselId: v.vesselId, after: cargo, metadata: { voyageId } },
         tx,
       );
-      return cargo;
+      return { ...cargo, warnings: cargoQuantityWarnings(cargo) };
     });
   }
 
@@ -263,7 +265,7 @@ export class VoyageItineraryService {
         { action: 'voyage.cargo_updated', module: 'voyages', entityType: 'cargo', entityId: cargoId, vesselId: v.vesselId, ...diffFields(before as never, after as never), metadata: { voyageId } },
         tx,
       );
-      return after;
+      return { ...after, warnings: cargoQuantityWarnings(after) };
     });
   }
 

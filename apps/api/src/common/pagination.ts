@@ -41,11 +41,20 @@ export const queryBool = z
   .optional()
   .transform((v) => (v === undefined ? undefined : v === true || v === 'true' || v === '1'));
 
-/** Date "YYYY-MM-DD" -> Date UTC minuit (colonnes @db.Date). */
-export const dateOnly = z
+/** Vrai si "YYYY-MM-DD" désigne un jour qui existe (rejette 30/02, mois 13…), au lieu d'un décalage silencieux. */
+export function isExistingDate(s: string): boolean {
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/** Chaîne "YYYY-MM-DD" validée (jour existant), sans transformation — réutilisée par l'import. */
+export const dateOnlyString = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Format attendu AAAA-MM-JJ')
-  .transform((s) => new Date(`${s}T00:00:00.000Z`));
+  .refine(isExistingDate, 'Date inexistante');
+
+/** Date "YYYY-MM-DD" -> Date UTC minuit (colonnes @db.Date). */
+export const dateOnly = dateOnlyString.transform((s) => new Date(`${s}T00:00:00.000Z`));
 
 /** Décimal transmis en chaîne ou nombre — conservé en chaîne pour Prisma.Decimal (jamais float). */
 export const decimalString = (opts: { min?: number; scale?: number } = {}) =>
@@ -59,11 +68,17 @@ export const decimalString = (opts: { min?: number; scale?: number } = {}) =>
       `Au plus ${opts.scale} décimales`,
     );
 
+/** Liste blanche ISO 4217 fournie par le runtime (audit ACH-11 : « ZZZ » était accepté). */
+const ISO_CURRENCIES = new Set<string>(
+  (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('currency') ?? [],
+);
+
 export const isoCurrency = z
   .string()
   .trim()
   .toUpperCase()
-  .regex(/^[A-Z]{3}$/, 'Code devise ISO 4217 attendu (ex. EUR, USD, TND)');
+  .regex(/^[A-Z]{3}$/, 'Code devise ISO 4217 attendu (ex. EUR, USD, TND)')
+  .refine((c) => ISO_CURRENCIES.size === 0 || ISO_CURRENCIES.has(c), 'Devise inconnue (code ISO 4217 attendu, ex. EUR, USD, TND)');
 
 export const countryCode = z
   .string()

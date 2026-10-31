@@ -8,8 +8,13 @@ import {
   changedProtectedFields,
   deriveMemberStatus,
   idKey,
+  isKnownCountry,
+  memberDataIssues,
   nameKey,
+  onboardAtDateWhere,
+  planBlockedByOnboardElsewhere,
   resolveManualStatus,
+  searchIdentifierKey,
   validateCustomFieldValue,
 } from './members.logic';
 
@@ -127,5 +132,57 @@ describe('Validité calculée d’un certificat', () => {
     expect(certificateValidity('DATED', new Date('2026-12-01T00:00:00Z'), today, 90)).toBe('EXPIRING_SOON');
     expect(certificateValidity('DATED', new Date('2027-03-15T00:00:00Z'), today, 90)).toBe('VALID');
     expect(certificateValidity(null, null, today, 90)).toBe('NOT_APPROVED');
+  });
+});
+
+describe('Équipage à une date (audit FLT-02)', () => {
+  it('une affectation sans débarquement ne compte à bord que si elle est ONBOARD', () => {
+    const date = new Date('2026-10-29T00:00:00.000Z');
+    expect(onboardAtDateWhere('v1', date)).toEqual({
+      vesselId: 'v1',
+      status: { in: ['ONBOARD', 'COMPLETED'] },
+      actualJoinDate: { lte: date },
+      OR: [{ status: 'ONBOARD', actualSignOffDate: null }, { actualSignOffDate: { gte: date } }],
+    });
+  });
+});
+
+describe('Planification d’un marin encore à bord ailleurs (audit FLT-24)', () => {
+  it('refusée seulement si la date prévue est déjà passée', () => {
+    expect(planBlockedByOnboardElsewhere('2026-10-25', '2026-10-30', true)).toBe(true);
+    expect(planBlockedByOnboardElsewhere('2026-10-30', '2026-10-30', true)).toBe(false);
+    expect(planBlockedByOnboardElsewhere('2026-11-15', '2026-10-30', true)).toBe(false);
+    expect(planBlockedByOnboardElsewhere(null, '2026-10-30', true)).toBe(false);
+    expect(planBlockedByOnboardElsewhere('2026-10-25', '2026-10-30', false)).toBe(false);
+  });
+});
+
+describe('Contrôles communs saisie / import (audit FLT-13)', () => {
+  it('codes pays attribués seulement', () => {
+    expect(isKnownCountry('TN')).toBe(true);
+    expect(isKnownCountry('FR')).toBe(true);
+    expect(isKnownCountry('XX')).toBe(false);
+    expect(isKnownCountry('ZZ')).toBe(false);
+    expect(isKnownCountry('tn')).toBe(false);
+  });
+
+  it('naissance, pays et expirations', () => {
+    const today = '2026-10-30';
+    expect(memberDataIssues({ birthDate: '1985-04-12', nationality: 'TN', passportExpiry: '2030-01-01' }, today)).toEqual([]);
+    expect(memberDataIssues({ birthDate: '1850-01-01' }, today).map((i) => i.field)).toEqual(['birthDate']);
+    expect(memberDataIssues({ birthDate: '2027-01-01' }, today).map((i) => i.field)).toEqual(['birthDate']);
+    expect(memberDataIssues({ nationality: 'XX', passportCountry: 'XX' }, today).map((i) => i.field)).toEqual(['nationality', 'passportCountry']);
+    expect(memberDataIssues({ birthDate: '1985-04-12', passportExpiry: '1980-01-01', seamanBookExpiry: '1984-01-01' }, today).map((i) => i.field)).toEqual([
+      'passportExpiry',
+      'seamanBookExpiry',
+    ]);
+  });
+});
+
+describe('Recherche par identifiant (audit FLT-04)', () => {
+  it('compare sans espaces ni ponctuation', () => {
+    expect(searchIdentifierKey('TG 2384')).toBe('TG2384');
+    expect(searchIdentifierKey('tg-2384')).toBe('TG2384');
+    expect(searchIdentifierKey(' a ')).toBeNull();
   });
 });

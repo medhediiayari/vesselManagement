@@ -4,12 +4,14 @@ import { isKnownPermission } from '@amc/types';
 import { Errors } from '../../common/errors';
 import { cursorArgs, toPage } from '../../common/pagination';
 import { temporaryPassword } from '../../common/utils/crypto';
+import { containsText, escapeLike } from '../../common/utils/like';
 import { PrismaService, Tx } from '../../prisma/prisma.service';
 import { AccessService, SUPER_ADMIN_ROLE_KEY } from '../access/access.service';
 import type { AuthContext } from '../access/auth-context';
 import { assertMemberVisible } from '../access/member-access';
 import { AuditService } from '../audit/audit.service';
-import { PasswordService } from '../auth/password.service';
+import { invalidateResetTokens, PasswordService } from '../auth/password.service';
+import { selfLockoutDenies } from './admin.logic';
 import {
   CreateUserDto,
   ListUsersQuery,
@@ -69,13 +71,20 @@ export class UsersService {
         q.search
           ? {
               OR: [
-                { username: { contains: q.search.toLowerCase() } },
-                { email: { contains: q.search.toLowerCase() } },
-                { displayName: { contains: q.search, mode: 'insensitive' } },
+                { username: { contains: escapeLike(q.search.toLowerCase()) } },
+                { email: { contains: escapeLike(q.search.toLowerCase()) } },
+                { displayName: containsText(q.search) },
               ],
             }
           : {},
-        q.status === 'LOCKED' ? { lockedAt: { not: null } } : q.status ? { status: q.status } : {},
+        // « Actifs » exclut les comptes verrouillés, comptés à part (ADM-17)
+        q.status === 'LOCKED'
+          ? { lockedAt: { not: null } }
+          : q.status === 'ACTIVE'
+            ? { status: 'ACTIVE', lockedAt: null }
+            : q.status
+              ? { status: q.status }
+              : {},
         q.roleId ? { roles: { some: { roleId: q.roleId } } } : {},
         q.departmentId ? { departments: { some: { departmentId: q.departmentId } } } : {},
       ],
@@ -127,6 +136,8 @@ export class UsersService {
 
     const user = await this.prisma.$transaction(async (tx) => {
       if (dto.memberId) await this.assertMemberLinkable(tx, dto.memberId, null);
+      // Références vérifiées avant écriture : 422 explicite plutôt qu'une erreur de clé étrangère (ADM-27)
+      if (dto.vesselScope.mode === 'SELECTED') await this.assertVesselsExist(tx, dto.vesselScope.vesselIds);
       const created = await tx.user.create({
         data: {
           companyId: company.id,
@@ -140,13 +151,13 @@ export class UsersService {
           vesselScope: dto.vesselScope.mode,
           memberId: dto.memberId ?? null,
           createdById: ctx.userId,
-          roles: { create: dto.roleIds.map((roleId) => ({ roleId, assignedById: ctx.userId })) },
+          roles: { create: [...new Set(dto.roleIds)].map((roleId) => ({ roleId, assignedById: ctx.userId })) },
           overrides: {
             create: dto.overrides.map((o) => ({ ...o, createdById: ctx.userId })),
           },
           vesselAccess:
             dto.vesselScope.mode === 'SELECTED'
-              ? { create: dto.vesselScope.vesselIds.map((vesselId) => ({ vesselId, grantedById: ctx.userId })) }
+              ? { create: [...new Set(dto.vesselScope.vesselIds)].map((vesselId) => ({ vesselId, grantedById: ctx.userId })) }
               : undefined,
         },
         select: USER_SELECT,
@@ -176,10 +187,11 @@ export class UsersService {
         data: {
           username: dto.username,
           email: dto.email === undefined ? undefined : dto.email,
+          // Nouvelle adresse = jamais vérifiée d'office (ADM-13) : la case se coche dans un second temps
           emailVerifiedAt:
             dto.email !== undefined && dto.email !== before.email
-              ? dto.emailVerified ? new Date() : null
-              : dto.emailVerified === undefined ? undefined : dto.emailVerified ? new Date() : null,
+              ? null
+              : dto.emailVerified === undefined ? undefined : dto.emailVerified ? (before.emailVerifiedAt ?? new Date()) : null,
           displayName: dto.displayName,
           jobTitle: dto.jobTitle === undefined ? undefined : dto.jobTitle,
         },
@@ -232,10 +244,17 @@ export class UsersService {
   async setOverrides(ctx: AuthContext, id: string, overrides: { permissionKey: string; effect: 'ALLOW' | 'DENY'; reason?: string }[]) {
     await this.loadManageable(ctx, id);
     this.assertOverridesGrantable(ctx, overrides);
-    if (id === ctx.userId && overrides.some((o) => o.effect === 'ALLOW')) {
-      throw Errors.forbidden("Impossible de s'accorder à soi-même des permissions");
-    }
     const before = await this.prisma.permissionOverride.findMany({ where: { userId: id } });
+    if (id === ctx.userId) {
+      if (overrides.some((o) => o.effect === 'ALLOW')) throw Errors.forbidden("Impossible de s'accorder à soi-même des permissions");
+      // Un DENY sur ses propres droits d'administration serait irréversible (ADM-05) ; un DENY existant reste conservable
+      const lockout = selfLockoutDenies(overrides, before);
+      if (lockout.length) {
+        throw Errors.business("Impossible de se retirer à soi-même un droit d'administration : demandez-le à un autre administrateur", {
+          permissions: lockout,
+        });
+      }
+    }
     await this.prisma.$transaction(async (tx) => {
       await tx.permissionOverride.deleteMany({ where: { userId: id } });
       if (overrides.length) {
@@ -265,10 +284,7 @@ export class UsersService {
     this.access.assertCanGrantVessels(ctx, dto.mode, dto.vesselIds);
     const before = await this.prisma.userVesselAccess.findMany({ where: { userId: id }, select: { vesselId: true } });
     await this.prisma.$transaction(async (tx) => {
-      if (dto.vesselIds.length) {
-        const count = await tx.vessel.count({ where: { id: { in: dto.vesselIds } } });
-        if (count !== new Set(dto.vesselIds).size) throw Errors.validation('Navire inconnu dans la sélection');
-      }
+      await this.assertVesselsExist(tx, dto.vesselIds);
       await tx.user.update({ where: { id }, data: { vesselScope: dto.mode } });
       await tx.userVesselAccess.deleteMany({ where: { userId: id } });
       if (dto.mode === 'SELECTED' && dto.vesselIds.length) {
@@ -319,11 +335,16 @@ export class UsersService {
     if (!active && user.roles.some((r) => r.key === SUPER_ADMIN_ROLE_KEY)) {
       await this.assertNotLastSuperAdmin(this.prisma, id);
     }
+    // Opération sans effet : refusée, donc jamais journalisée (ADM-28)
+    if (user.status === (active ? 'ACTIVE' : 'DEACTIVATED')) {
+      throw Errors.invalidState(active ? 'Ce compte est déjà actif' : 'Ce compte est déjà désactivé');
+    }
     await this.prisma.$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id },
+      const res = await tx.user.updateMany({
+        where: { id, status: user.status },
         data: { status: active ? 'ACTIVE' : 'DEACTIVATED', deactivatedAt: active ? null : new Date() },
       });
+      if (res.count === 0) throw Errors.alreadyProcessed('Le statut de ce compte vient de changer : rechargez la page');
       if (!active) {
         await tx.session.updateMany({
           where: { userId: id, revokedAt: null },
@@ -367,6 +388,8 @@ export class UsersService {
         where: { id },
         data: { passwordHash, mustChangePassword: true, lockedAt: null, failedLogins: 0, passwordChangedAt: new Date() },
       });
+      // Un ancien lien « mot de passe oublié » ne doit pas contourner le mot de passe temporaire (ADM-03)
+      await invalidateResetTokens(tx, id);
       await tx.session.updateMany({
         where: { userId: id, revokedAt: null },
         data: { revokedAt: new Date(), revokedById: ctx.userId, revokedReason: 'PASSWORD_RESET_BY_ADMIN' },
@@ -376,7 +399,9 @@ export class UsersService {
     return { temporaryPassword: tempPassword, mustChangePassword: true };
   }
 
-  async listSessions(id: string) {
+  /** Sessions (IP, navigateur) : réservées à qui peut gérer ce compte (ADM-14). */
+  async listSessions(ctx: AuthContext, id: string) {
+    await this.loadManageable(ctx, id);
     return this.prisma.session.findMany({
       where: { userId: id },
       orderBy: { lastSeenAt: 'desc' },
@@ -390,10 +415,16 @@ export class UsersService {
 
   async revokeSession(ctx: AuthContext, userId: string, sessionId: string | 'all') {
     await this.loadManageable(ctx, userId);
+    if (sessionId !== 'all') {
+      const session = await this.prisma.session.findFirst({ where: { id: sessionId, userId }, select: { id: true } });
+      if (!session) throw Errors.notFound('Session');
+    }
     const res = await this.prisma.session.updateMany({
       where: { userId, revokedAt: null, ...(sessionId === 'all' ? {} : { id: sessionId }) },
       data: { revokedAt: new Date(), revokedById: ctx.userId, revokedReason: 'ADMIN_REVOKED' },
     });
+    // Rien à révoquer : refusé, sans trace d'audit (ADM-28)
+    if (res.count === 0) throw Errors.invalidState(sessionId === 'all' ? 'Aucune session active à révoquer' : 'Cette session est déjà fermée');
     await this.audit.record(ctx, {
       action: 'user.sessions_revoked',
       module: 'admin',
@@ -431,21 +462,22 @@ export class UsersService {
     const user = await this.prisma.user.findUnique({ where: { id }, select: USER_SELECT });
     if (!user) throw Errors.notFound('Utilisateur');
     const p = present(user);
+    // Son propre compte : pas de contrôle « Super Admin » (un Super Admin avec un DENY doit pouvoir le retirer, ADM-05).
+    // Les actions sensibles sur soi-même ont leurs propres garde-fous (statut, ALLOW, DENY d'administration).
+    if (id === ctx.userId) return p;
     if (ctx.isSuperAdmin && ctx.deniedPermissions.size === 0) return p;
     if (p.roles.some((r) => r.key === SUPER_ADMIN_ROLE_KEY)) {
       throw Errors.forbidden('Seul un Super Admin peut gérer un compte Super Admin');
     }
-    if (id !== ctx.userId) {
-      const eff = await this.access.computeEffectivePermissions(id);
-      const beyond = [...eff.permissions].filter((k) => !ctx.permissions.has(k));
-      if (beyond.length) {
-        throw Errors.forbidden('Ce compte dispose de droits que vous ne possédez pas : seul un administrateur de niveau supérieur peut le gérer', {
-          missing: beyond.slice(0, 20),
-        });
-      }
-      const targetVessels = (await this.prisma.userVesselAccess.findMany({ where: { userId: id }, select: { vesselId: true } })).map((v) => v.vesselId);
-      this.access.assertCanGrantVessels(ctx, p.vesselScope, targetVessels);
+    const eff = await this.access.computeEffectivePermissions(id);
+    const beyond = [...eff.permissions].filter((k) => !ctx.permissions.has(k));
+    if (beyond.length) {
+      throw Errors.forbidden('Ce compte dispose de droits que vous ne possédez pas : seul un administrateur de niveau supérieur peut le gérer', {
+        missing: beyond.slice(0, 20),
+      });
     }
+    const targetVessels = (await this.prisma.userVesselAccess.findMany({ where: { userId: id }, select: { vesselId: true } })).map((v) => v.vesselId);
+    this.access.assertCanGrantVessels(ctx, p.vesselScope, targetVessels);
     return p;
   }
 
@@ -471,6 +503,12 @@ export class UsersService {
     if (count === 0) throw Errors.business('Impossible : dernier Super Admin actif');
   }
 
+  private async assertVesselsExist(tx: Tx, vesselIds: string[]) {
+    if (!vesselIds.length) return;
+    const count = await tx.vessel.count({ where: { id: { in: vesselIds } } });
+    if (count !== new Set(vesselIds).size) throw Errors.validation('Navire inconnu dans la sélection');
+  }
+
   private async assertMemberLinkable(tx: Tx, memberId: string, userId: string | null) {
     const member = await tx.member.findUnique({ where: { id: memberId }, select: { id: true, user: { select: { id: true } } } });
     if (!member) throw Errors.notFound('Member');
@@ -484,6 +522,8 @@ export class UsersService {
     const existing = await tx.departmentMembership.findMany({ where: { userId } });
     const newIds = [...wanted].filter((d) => !existing.some((e) => e.departmentId === d));
     if (newIds.length) {
+      const known = await tx.department.count({ where: { id: { in: newIds } } });
+      if (known !== newIds.length) throw Errors.validation('Département inconnu dans la sélection');
       // Aucune nouvelle affectation vers un département inactif (ADM-028)
       const inactive = await tx.department.findMany({ where: { id: { in: newIds }, status: 'INACTIVE' }, select: { name: true } });
       if (inactive.length) throw Errors.business('Département inactif : nouvelle affectation impossible', { departments: inactive.map((d) => d.name) });

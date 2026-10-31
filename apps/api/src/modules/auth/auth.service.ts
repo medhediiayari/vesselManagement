@@ -7,7 +7,7 @@ import type { AuthContext } from '../access/auth-context';
 import { AuditService } from '../audit/audit.service';
 import { EmailService } from '../notifications/email.service';
 import { SettingsService } from '../settings/settings.service';
-import { PasswordService } from './password.service';
+import { invalidateResetTokens, PasswordService } from './password.service';
 
 export interface LoginResult {
   sessionToken: string;
@@ -160,6 +160,7 @@ export class AuthService {
         where: { id: user.id },
         data: { passwordHash: hash, mustChangePassword: false, passwordChangedAt: new Date() },
       });
+      await invalidateResetTokens(tx, user.id);
       await tx.session.updateMany({
         where: { userId: user.id, revokedAt: null, id: { not: ctx.sessionId } },
         data: { revokedAt: new Date(), revokedReason: 'PASSWORD_CHANGED' },
@@ -180,7 +181,9 @@ export class AuthService {
   /**
    * Lien de réinitialisation à usage unique vers email VÉRIFIÉ (ADM-009).
    * Réponse identique que l'utilisateur existe ou non (anti-énumération).
-   * N'efface jamais un verrouillage : seul un admin déverrouille (ADM-015).
+   * N'efface jamais un verrouillage : seul un admin déverrouille (ADM-015). Compte verrouillé : aucun lien,
+   * le titulaire est prévenu par e-mail de contacter un administrateur (réponse HTTP inchangée).
+   * Chaque nouvelle demande invalide les liens précédents.
    */
   async forgotPassword(identifier: string, meta: RequestMeta): Promise<void> {
     const ident = identifier.trim().toLowerCase();
@@ -198,9 +201,28 @@ export class AuthService {
       });
       return;
     }
+    if (user.lockedAt) {
+      await this.email.sendNow({
+        to: user.email,
+        subject: 'AMC — Compte verrouillé',
+        text: `Bonjour ${user.displayName},\n\nUne réinitialisation du mot de passe a été demandée pour votre compte AMC.\nVotre compte est verrouillé : contactez un administrateur, qui vous remettra un mot de passe temporaire.\n\nSi vous n'êtes pas à l'origine de cette demande, prévenez votre administrateur.`,
+      });
+      await this.audit.system({
+        action: 'auth.reset_requested_ignored',
+        module: 'auth',
+        entityType: 'user',
+        entityId: user.id,
+        result: 'DENIED',
+        metadata: { reason: 'LOCKED', ip: meta.ip },
+      });
+      return;
+    }
     const token = randomToken(32);
-    await this.prisma.passwordResetToken.create({
-      data: { userId: user.id, tokenHash: sha256Hex(token), expiresAt: new Date(Date.now() + 60 * 60_000) },
+    await this.prisma.$transaction(async (tx) => {
+      await invalidateResetTokens(tx, user.id);
+      await tx.passwordResetToken.create({
+        data: { userId: user.id, tokenHash: sha256Hex(token), expiresAt: new Date(Date.now() + 60 * 60_000) },
+      });
     });
     const link = `${env().APP_BASE_URL}/reset-password?token=${encodeURIComponent(token)}`;
     await this.email.sendNow({
@@ -219,6 +241,8 @@ export class AuthService {
     if (!row || row.usedAt || row.expiresAt < new Date() || row.user.status !== 'ACTIVE') {
       throw Errors.validation('Lien de réinitialisation invalide ou expiré');
     }
+    // Le porteur du lien prouve qu'il détient la boîte : on peut lui dire pourquoi (ADM-04)
+    if (row.user.lockedAt) throw Errors.business('Compte verrouillé : contactez un administrateur');
     await this.passwords.assertPolicy(newPassword, { username: row.user.username, email: row.user.email });
     const hash = await this.passwords.hash(newPassword);
     await this.prisma.$transaction(async (tx) => {
@@ -227,10 +251,13 @@ export class AuthService {
         data: { usedAt: new Date() },
       });
       if (consumed.count !== 1) throw Errors.validation('Lien déjà utilisé');
-      await tx.user.update({
-        where: { id: row.userId },
+      // Verrou posé entre la lecture et l'écriture : on ne remplace pas le mot de passe
+      const updated = await tx.user.updateMany({
+        where: { id: row.userId, lockedAt: null },
         data: { passwordHash: hash, mustChangePassword: false, passwordChangedAt: new Date() },
       });
+      if (updated.count !== 1) throw Errors.business('Compte verrouillé : contactez un administrateur');
+      await invalidateResetTokens(tx, row.userId);
       await tx.session.updateMany({
         where: { userId: row.userId, revokedAt: null },
         data: { revokedAt: new Date(), revokedReason: 'PASSWORD_RESET' },

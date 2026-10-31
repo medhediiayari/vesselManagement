@@ -27,6 +27,7 @@ import { PurchasingConfigService } from './purchasing-config.service';
 import { PurchasingCore } from './purchasing-core.service';
 import { PurchasingDocuments } from './purchasing-documents.service';
 import { LINKS } from './purchasing.constants';
+import { escapeLike } from '../../common/utils/like';
 import {
   D,
   OverAllocation,
@@ -124,9 +125,9 @@ export class OrdersService {
     if (q.search) {
       and.push({
         OR: [
-          { number: { contains: q.search, mode: 'insensitive' } },
-          { supplier: { name: { contains: q.search, mode: 'insensitive' } } },
-          { lines: { some: { designation: { contains: q.search, mode: 'insensitive' } } } },
+          { number: { contains: escapeLike(q.search), mode: 'insensitive' } },
+          { supplier: { name: { contains: escapeLike(q.search), mode: 'insensitive' } } },
+          { lines: { some: { designation: { contains: escapeLike(q.search), mode: 'insensitive' } } } },
         ],
       });
     }
@@ -743,6 +744,19 @@ export class OrdersService {
     };
   }
 
+  /**
+   * BC déjà transmis revenu à APPROVED (avenant approuvé) : retour au statut de réception dérivé du reçu, puis
+   * clôtures automatiques BC / PR (audit ACH-04).
+   */
+  private async resumeReceiptStatusTx(ctx: AuthContext, tx: Tx, id: string, trigger: string) {
+    const before = await tx.purchaseOrder.findUniqueOrThrow({ where: { id } });
+    if (before.status !== 'APPROVED' || !before.sentAt) return;
+    await tx.purchaseOrder.update({ where: { id }, data: { status: 'SENT', lockVersion: { increment: 1 } } });
+    await this.core.audit(ctx, { action: 'po.status_recomputed', entityType: 'purchase_order', entityId: id, vesselId: before.vesselId, before: { status: 'APPROVED' }, after: { status: 'SENT' }, metadata: { trigger } }, tx);
+    await this.core.recomputePoStatus(ctx, id, tx, trigger);
+    await this.core.settleClosures(ctx, [id], tx, trigger);
+  }
+
   /** Passage APPROVED → SENT (« émis ») ; statuts BC / PR recalculés. */
   private async markIssuedTx(ctx: AuthContext, tx: Tx, id: string, trigger: string) {
     const before = await tx.purchaseOrder.findUniqueOrThrow({ where: { id } });
@@ -858,10 +872,25 @@ export class OrdersService {
         tx,
       );
       await this.core.recomputePrStatuses(ctx, await this.core.prIdsForPos([id], tx), tx, 'po.approved');
-      await this.notifyUsers(tx, [po.createdById], po, 'purchasing.po_approved', `BC ${po.number} approuvé (second regard) et émis`, dto.comment ?? undefined, 'bc.view');
-      // Flux simplifié : un BC approuvé jamais transmis est émis immédiatement (un avenant approuvé reste à renvoyer)
+      // Flux simplifié : un BC approuvé jamais transmis est émis immédiatement
       const issueNow = !po.sentAt;
-      if (issueNow) await this.markIssuedTx(ctx, tx, id, 'po.approved');
+      if (issueNow) {
+        await this.notifyUsers(tx, [po.createdById], po, 'purchasing.po_approved', `BC ${po.number} approuvé (second regard) et émis`, dto.comment ?? undefined, 'bc.view');
+        await this.markIssuedTx(ctx, tx, id, 'po.approved');
+      } else {
+        // Avenant d'un BC déjà transmis : le BC reprend son statut de réception (livraisons enregistrées pendant le
+        // second regard comprises) et se clôture si tout est reçu ; la nouvelle version reste à noter comme envoyée
+        await this.resumeReceiptStatusTx(ctx, tx, id, 'po.amendment_approved');
+        await this.notifyUsers(
+          tx,
+          [po.createdById],
+          po,
+          'purchasing.po_approved',
+          `Avenant n°${po.revisionNo} du BC ${po.number} approuvé (second regard)`,
+          ['Notez l’envoi de la nouvelle version au fournisseur.', dto.comment].filter(Boolean).join('\n'),
+          'bc.view',
+        );
+      }
       return { after: await tx.purchaseOrder.findUniqueOrThrow({ where: { id } }), issueNow };
     });
     if (result.issueNow) await this.afterIssue(ctx, id);
@@ -934,6 +963,8 @@ export class OrdersService {
       );
       if (wasApproved) {
         await this.core.recomputePoStatus(ctx, id, tx, 'po.marked_sent');
+        // Livraisons déjà enregistrées (BC transmis puis avenant approuvé) : clôture si tout est reçu (ACH-04)
+        await this.core.settleClosures(ctx, [id], tx, 'po.marked_sent');
         await this.notifyOnboard(ctx, tx, po, file.id, 'sent');
       }
       return { order: await tx.purchaseOrder.findUniqueOrThrow({ where: { id } }), dispatch };
@@ -1260,7 +1291,7 @@ export class OrdersService {
       approvalDecision: result.approvalDecision,
       note: result.reapprovalRequired
         ? 'Avenant soumis à second regard (bc.approve, autre personne) : le renvoi au fournisseur est bloqué jusqu’à approbation.'
-        : 'Révision enregistrée : renvoyez le BC au fournisseur (POST /orders/:id/send) pour lui transmettre la nouvelle version.',
+        : 'Révision enregistrée : transmettez la nouvelle version au fournisseur puis notez l’envoi (« Noter l’envoi au fournisseur »).',
     };
   }
 

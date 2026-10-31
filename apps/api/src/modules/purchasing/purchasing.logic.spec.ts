@@ -26,6 +26,7 @@ import {
   distributeFifo,
   effectiveQuantity,
   evaluateAllocations,
+  invoiceMatchReasonsText,
   isAutoClosable,
   isPoReceivable,
   planSplit,
@@ -451,6 +452,11 @@ describe('Rapprochement facture', () => {
     expect(r.reasons).toContain('CURRENCY_MISMATCH');
   });
 
+  it('motifs d’écart libellés en français (UI-02)', () => {
+    const r = suggestInvoiceMatch('EUR', [{ poId: 'p', currency: 'EUR', orderedTotal: 100, receivedValue: 50, invoicedCumulative: 120 }]);
+    expect(invoiceMatchReasonsText(r.reasons)).toBe('dépasse le montant commandé, dépasse la valeur reçue à bord');
+  });
+
   it('valeur reçue au prorata, exacte si tout est reçu', () => {
     const po = { subtotal: 100, taxAmount: 10, freightAmount: 10, totalAmount: 120 };
     expect(s(receivedValue([{ unitPrice: 10, accepted: 7, effectiveOrdered: 10, remaining: 3, status: 'OPEN' }], po))).toBe('84');
@@ -546,6 +552,11 @@ describe('Division en sous-PR (refonte 22/10/2026)', () => {
     expect(canTransition(PR_TRANSITIONS, 'APPROVED', 'SPLIT')).toBe(true);
     expect(canTransition(PR_TRANSITIONS, 'ORDERED', 'SPLIT')).toBe(false);
     expect(PR_TRANSITIONS.SPLIT).toEqual(['CLOSED']);
+  });
+
+  it('PR en attente reprise au statut dérivé, même commandée ou reçue pendant l’attente (ACH-02)', () => {
+    for (const to of ['ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CLOSED'] as const) expect(canTransition(PR_TRANSITIONS, 'ON_HOLD', to)).toBe(true);
+    expect(canTransition(PR_TRANSITIONS, 'ON_HOLD', 'SPLIT')).toBe(false);
   });
 });
 

@@ -232,6 +232,7 @@ export class CsoImportService implements OnModuleInit {
     const rows: { raw: Prisma.InputJsonValue; normalized: NormalizedRow; errors: string[]; warnings: string[] }[] = [];
     const seenRefs = new Map<string, number>();
     const seenHashes = new Map<string, number>();
+    const seenTitles = new Map<string, number>();
     for (const [i, e] of entries.entries()) {
       const path = e.segments.join('/');
       const fileName = e.segments[e.segments.length - 1];
@@ -288,6 +289,14 @@ export class CsoImportService implements OnModuleInit {
         else seenHashes.set(e.sha256, i + 1);
       }
       const title = (m?.title ?? fileName.replace(/\.[A-Za-z0-9]{1,10}$/, '')).slice(0, 300) || fileName;
+      // Homonymes dans un même dossier du lot (Procedure.pdf / procedure.PDF / Procedure.docx — CSO-10)
+      const titleKey = [...folderSegments, title.trim()].map((s) => s.toLowerCase()).join('\u0000');
+      const prevTitle = seenTitles.get(titleKey);
+      if (!errors.length) {
+        // Seules les lignes encore valides réservent le titre (une ligne refusée ne bloque pas son homonyme)
+        if (prevTitle !== undefined) errors.push(`Titre en double dans le même dossier de l’import (ligne ${prevTitle}) : préciser un titre distinct dans le classeur de métadonnées`);
+        else seenTitles.set(titleKey, i + 1);
+      }
       rows.push({
         raw: { path, sizeBytes: e.size, compressedSize: e.compressed, metadataRow: m?.rowNumber ?? null },
         normalized: {

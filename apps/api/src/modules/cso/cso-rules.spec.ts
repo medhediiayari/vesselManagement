@@ -14,6 +14,7 @@ import {
   referenceSequenceKey,
   renderReference,
   restorationSource,
+  restorePlan,
   sanitizeZipSegment,
   uniqueZipName,
   validateReferenceFormat,
@@ -162,5 +163,17 @@ describe('CSO — source de restauration (audit #10)', () => {
   it('jamais de repli sur une version non approuvée (brouillon, rejetée, annulée)', () => {
     expect(restorationSource([v(1, 'REJECTED', null), v(2, 'CANCELLED', null), v(3, 'DRAFT', null)])).toBeNull();
     expect(restorationSource([])).toBeNull();
+  });
+
+  it('CSO-03 : document jamais approuvé -> restauration en brouillon avec le dernier fichier', () => {
+    const plan = restorePlan([v(1, 'CANCELLED', null), v(3, 'CANCELLED', null), v(2, 'RETURNED', null)]);
+    expect(plan?.mode).toBe('DRAFT');
+    expect(plan?.source.versionNo).toBe(3);
+  });
+
+  it('CSO-03 : document déjà approuvé -> nouvelle approbation de la dernière version approuvée', () => {
+    const plan = restorePlan([v(1, 'SUPERSEDED', '2026-01-01'), v(2, 'CANCELLED', null)]);
+    expect(plan).toEqual({ mode: 'APPROVAL', source: expect.objectContaining({ versionNo: 1 }) });
+    expect(restorePlan([])).toBeNull();
   });
 });

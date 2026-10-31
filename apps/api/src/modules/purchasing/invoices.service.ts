@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { InvoiceStatus, Prisma } from '@prisma/client';
 import { Errors } from '../../common/errors';
 import { cursorArgs, toPage } from '../../common/pagination';
 import { Db, PrismaService } from '../../prisma/prisma.service';
@@ -9,17 +9,22 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CreateInvoiceDto, InvoiceStatusDto, ListInvoicesQuery } from './invoices.dto';
 import { PurchasingCore } from './purchasing-core.service';
 import { LINKS } from './purchasing.constants';
+import { escapeLike } from '../../common/utils/like';
 import {
   D,
   INVOICE_TRANSITIONS,
   assertTransition,
   computeBalance,
   fmtMoney,
+  invoiceMatchReasonsText,
   receivedValue,
   round2,
   suggestInvoiceMatch,
   sumD,
 } from './purchasing.logic';
+
+/** Factures à examiner : le rapprochement est recalculé pour signaler un écart (audit ACH-13). */
+const OPEN_INVOICE_STATUSES: readonly InvoiceStatus[] = ['RECEIVED', 'UNDER_REVIEW'];
 
 /**
  * Factures fournisseurs (CDC §6.7) : fichier original, numéro, montants, devise, liens vers un ou plusieurs BC
@@ -39,11 +44,12 @@ export class InvoicesService {
     const where: Prisma.InvoiceWhereInput = {
       AND: [
         vesselWhere(ctx) as Prisma.InvoiceWhereInput,
+        this.core.invoiceOwnWhere(ctx),
         q.supplierId ? { supplierId: q.supplierId } : {},
         q.vesselId ? { vesselId: q.vesselId } : {},
         q.poId ? { orders: { some: { poId: q.poId } } } : {},
         q.status?.length ? { status: { in: q.status } } : {},
-        q.search ? { number: { contains: q.search, mode: 'insensitive' } } : {},
+        q.search ? { number: { contains: escapeLike(q.search), mode: 'insensitive' } } : {},
       ],
     };
     const [rows, total] = await Promise.all([
@@ -55,7 +61,30 @@ export class InvoicesService {
       }),
       this.prisma.invoice.count({ where }),
     ]);
-    return toPage(rows, q, total);
+    const page = toPage(rows, q, total);
+    // Écart de rapprochement des factures à examiner (la facture garde son statut — audit ACH-13)
+    const items = [];
+    for (const r of page.items) {
+      const m = OPEN_INVOICE_STATUSES.includes(r.status) ? await this.matching(r.id) : null;
+      items.push({ ...r, reconciliation: m ? { suggestion: m.suggestion, reasons: m.reasons } : null });
+    }
+    return { ...page, items };
+  }
+
+  /**
+   * Factures à examiner (RECEIVED / UNDER_REVIEW) dont le rapprochement présente un écart, dans le filtre donné
+   * (déjà restreint au périmètre de l'utilisateur). Calcul borné à `limit` factures : `capped` le signale.
+   */
+  async countReconciliationGaps(where: Prisma.InvoiceWhereInput, limit = 200): Promise<{ count: number; capped: boolean }> {
+    const open = await this.prisma.invoice.findMany({
+      where: { AND: [where, { status: { in: [...OPEN_INVOICE_STATUSES] } }] },
+      select: { id: true },
+      orderBy: { invoiceDate: 'desc' },
+      take: limit + 1,
+    });
+    let count = 0;
+    for (const inv of open.slice(0, limit)) if ((await this.matching(inv.id)).suggestion === 'DISPUTED') count++;
+    return { count, capped: open.length > limit };
   }
 
   private async find(ctx: AuthContext, id: string, db: Db = this.prisma) {
@@ -63,6 +92,7 @@ export class InvoicesService {
     if (!inv) throw Errors.notFound('Facture');
     // vessel_id toujours renseigné à la création (BC d'un même navire)
     this.access.assertVesselAccess(ctx, inv.vesselId);
+    await this.core.assertInvoiceVisible(ctx, inv.id, db);
     return inv;
   }
 
@@ -181,7 +211,7 @@ export class InvoicesService {
             excludeUserIds: [ctx.userId],
             type: 'purchasing.invoice_disputed',
             title: `Facture ${dto.number} (${supplier.name}) : écart de rapprochement`,
-            body: `Motifs : ${matching.reasons.join(', ')}`,
+            body: `Motifs : ${invoiceMatchReasonsText(matching.reasons)}.`,
             module: 'purchasing',
             entityType: 'invoice',
             entityId: inv.id,
@@ -205,6 +235,10 @@ export class InvoicesService {
     return this.prisma.$transaction(async (tx) => {
       const inv = await this.find(ctx, id, tx);
       assertTransition(INVOICE_TRANSITIONS, inv.status, dto.status, 'Facture');
+      // Annulation et litige : motif obligatoire, comme dans l'interface (audit ACH-12)
+      if ((dto.status === 'CANCELLED' || dto.status === 'DISPUTED') && !dto.notes) {
+        throw Errors.validation(dto.status === 'CANCELLED' ? 'Motif d’annulation obligatoire' : 'Motif du litige obligatoire', { field: 'notes' });
+      }
       if (dto.status === 'APPROVED') {
         // Séparation des tâches : ni l'auteur de la facture, ni celui qui l'a rapprochée (MATCHED) ne l'approuve
         if (inv.createdById === ctx.userId) throw Errors.selfApproval();
@@ -217,7 +251,7 @@ export class InvoicesService {
       }
       const matching = await this.matching(id, tx);
       if (dto.status === 'MATCHED' && matching.suggestion === 'DISPUTED' && !dto.notes) {
-        throw Errors.validation(`Rapprochement en écart (${matching.reasons.join(', ')}) : justification (notes) requise pour valider`);
+        throw Errors.validation(`Rapprochement en écart (${invoiceMatchReasonsText(matching.reasons)}) : justification requise pour valider`, { field: 'notes' });
       }
       const res = await tx.invoice.updateMany({
         where: { id, status: inv.status },

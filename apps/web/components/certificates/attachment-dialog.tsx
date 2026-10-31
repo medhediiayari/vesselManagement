@@ -4,11 +4,12 @@ import { FileText, Info, X } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { ApiError, api, errorMessage, type StoredFileDto } from '@/lib/api';
 import { fmtBytes } from '@/lib/format';
+import { useSession } from '@/lib/session';
 import { FileUploader } from '@/components/amc/file-uploader';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Field, Textarea } from '@/components/ui/field';
-import { announceWorkflow } from './lib';
+import { announceWorkflow, selfApproves } from './lib';
 import type { CertificateDetail, WorkflowResult } from './types';
 
 /**
@@ -32,7 +33,10 @@ export function AttachmentDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const noteId = useId();
+  const { can } = useSession();
   const replacing = !!certificate.currentRevision?.officialAttachment;
+  // Publication directe (self_approve) : la pièce devient officielle sans validation
+  const publishes = selfApproves(can, 'ATTACHMENT');
 
   useEffect(() => {
     if (open) {
@@ -48,7 +52,7 @@ export function AttachmentDialog({
     setError(null);
     try {
       const res = await api.post<WorkflowResult>(`/certificates/${certificate.id}/attachments`, { fileId: file.id, note: note.trim() || undefined });
-      announceWorkflow(res, 'Pièce déposée — en attente de validation');
+      announceWorkflow(res, res.autoApproved ? 'Document officiel publié' : 'Pièce déposée — en attente de validation');
       await onDone();
       onOpenChange(false);
     } catch (e) {
@@ -70,7 +74,7 @@ export function AttachmentDialog({
             Annuler
           </Button>
           <Button onClick={save} disabled={!file} loading={busy}>
-            Soumettre la pièce à validation
+            {publishes ? 'Publier le document' : 'Soumettre la pièce à validation'}
           </Button>
         </>
       }
@@ -78,10 +82,21 @@ export function AttachmentDialog({
       <div className="space-y-3">
         <p className="flex items-start gap-1.5 rounded-md bg-info-bg px-3 py-2 text-sm text-info">
           <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <span>
-            La pièce reste en attente et n’est jamais officielle avant son approbation par une autre personne.{' '}
-            {replacing ? 'Le document officiel actuel reste actif jusque-là.' : 'Le badge « Document manquant » reste affiché jusque-là.'}
-          </span>
+          {publishes ? (
+            <span>
+              Publication directe : la pièce devient le document officiel dès l’enregistrement
+              {replacing ? ' et le document actuel est archivé.' : '.'}
+            </span>
+          ) : (
+            <span>
+              La pièce reste en attente et n’est jamais officielle avant son approbation par une autre personne.{' '}
+              {replacing
+                ? 'Le document officiel actuel reste actif jusque-là.'
+                : certificate.documentRequired
+                  ? 'Le badge « Document manquant » reste affiché jusque-là.'
+                  : ''}
+            </span>
+          )}
         </p>
         {error && (
           <p role="alert" className="rounded-md border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger">
@@ -101,7 +116,7 @@ export function AttachmentDialog({
         ) : (
           <FileUploader context="CERTIFICATE" vesselId={certificate.vesselId} label="Déposer le certificat (PDF ou image)" onUploaded={setFile} />
         )}
-        <Field label="Note pour le validateur" htmlFor={noteId} hint="Facultatif.">
+        <Field label={publishes ? 'Note pour l’historique' : 'Note pour le validateur'} htmlFor={noteId} hint="Facultatif.">
           <Textarea id={noteId} rows={2} value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} />
         </Field>
       </div>

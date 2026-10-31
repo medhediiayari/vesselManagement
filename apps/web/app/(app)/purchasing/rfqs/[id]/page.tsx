@@ -30,6 +30,7 @@ import {
   isPast,
   purKeys,
   toDateInput,
+  todayInput,
   useCommand,
   useUrlParams,
 } from '@/components/purchasing/lib';
@@ -453,7 +454,7 @@ function EditRfqDialog({ rfq, onClose }: { rfq: RfqDetail; onClose: () => void }
           <Input value={v.title} onChange={(e) => setV((x) => ({ ...x, title: e.target.value }))} maxLength={300} />
         </FormField>
         <FormField label="Date limite">
-          <Input type="date" value={v.deadline} onChange={(e) => setV((x) => ({ ...x, deadline: e.target.value }))} />
+          <Input type="date" value={v.deadline} min={todayInput()} onChange={(e) => setV((x) => ({ ...x, deadline: e.target.value }))} />
         </FormField>
         <FormField label="Port de livraison">
           <Input value={v.deliveryPort} onChange={(e) => setV((x) => ({ ...x, deliveryPort: e.target.value }))} maxLength={120} />

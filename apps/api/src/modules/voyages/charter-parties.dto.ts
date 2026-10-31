@@ -3,6 +3,10 @@ import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { PaginationSchema, dateOnly } from '../../common/pagination';
 import { optionalText } from './voyages.dto';
+import { normalizeCpReference } from './voyages.logic';
+
+/** Date de signature : jamais dans le futur (tolérance d'un jour pour les fuseaux, audit FLT-16). */
+const cpDate = dateOnly.refine((d) => d.getTime() <= Date.now() + 86_400_000, 'Date de la Charter Party dans le futur');
 
 /**
  * Champs contractuels (CDC §7.2) : texte contrôlé stocké UNIQUEMENT lorsqu'il est fourni
@@ -10,7 +14,7 @@ import { optionalText } from './voyages.dto';
  */
 const CpContractSchema = z.object({
   cpType: z.nativeEnum(CharterPartyType),
-  cpDate: dateOnly.nullable().optional(),
+  cpDate: cpDate.nullable().optional(),
   charterer: optionalText(200),
   owner: optionalText(200),
   broker: optionalText(200),
@@ -30,7 +34,7 @@ const CpContractSchema = z.object({
 const laycanOrder = (v: { laycanFrom?: Date | null; laycanTo?: Date | null }) => !v.laycanFrom || !v.laycanTo || v.laycanFrom <= v.laycanTo;
 const laycanMessage = { message: 'Laycan : la date de début doit précéder la date de fin', path: ['laycanTo'] };
 
-const reference = z.string().trim().min(2).max(80);
+const reference = z.string().trim().min(2).max(80).transform(normalizeCpReference);
 
 export const CreateCharterPartySchema = CpContractSchema.extend({
   reference,

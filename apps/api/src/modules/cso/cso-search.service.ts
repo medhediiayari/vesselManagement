@@ -15,7 +15,8 @@ const MAX_SCAN = 5_000;
 
 /**
  * Recherche documentaire CSO (CSO-013, CDC §5.4/§5.6) : FTS PostgreSQL sur la colonne générée
- * `search_tsv` (référence + titre + description) + correspondance partielle titre/référence +
+ * `search_tsv` (référence + titre + description — le CONTENU des fichiers n'est pas indexé) +
+ * correspondance partielle titre/référence +
  * filtres métadonnées, requête entièrement paramétrée ($queryRaw / Prisma.sql, aucune concaténation).
  * Les candidats sont filtrés par droits effectifs AVANT réponse : aucun titre, référence ou compteur
  * de document non autorisé n'est divulgué ; aucune valeur de champ personnalisé n'est renvoyée.

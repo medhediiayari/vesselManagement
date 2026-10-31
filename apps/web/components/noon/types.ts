@@ -98,8 +98,12 @@ export interface NoonReportDetail extends NoonValuesDto {
   submittedBy: string | null;
   acknowledgedBy: string | null;
   submissionCheck: NoonIssue[];
+  /** Avertissements non bloquants (vraisemblance distance / ROB) */
+  submissionWarnings?: NoonIssue[];
+  /** Voyage planifié ou en cours : faux = brouillon figé */
+  voyageOpen?: boolean;
   allowedTransitions: NoonStatus[];
-  permissions: { edit: boolean; submit: boolean; acknowledge: boolean; requestCorrection: boolean; correct: boolean; export: boolean };
+  permissions: { edit: boolean; submit: boolean; acknowledge: boolean; requestCorrection: boolean; correct: boolean; export: boolean; discard?: boolean };
 }
 
 export interface NoonListItem {
@@ -123,8 +127,11 @@ export interface NoonListItem {
   submittedAt: string | null;
   acknowledgedAt: string | null;
   lockVersion: number;
+  createdAt?: string;
   updatedAt: string;
   reportDateLocal: string;
+  /** Brouillon : nombre de points bloquant la soumission (null hors brouillon) */
+  pendingIssues?: number | null;
   vessel: { id: string; code: string; name: string };
   voyage: { id: string; reference: string; status: string };
 }

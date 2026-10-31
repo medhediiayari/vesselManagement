@@ -206,8 +206,12 @@ export interface CsoDocumentSummary {
   viaShare?: boolean;
 }
 
+/** Document archivé : APPROVAL = nouvelle approbation ; DRAFT = jamais approuvé, restauré en brouillon (CSO-03). */
+export type CsoRestoreMode = 'APPROVAL' | 'DRAFT';
+
 export interface CsoDocumentListItem extends CsoDocumentSummary {
   currentVersion: CsoVersion | null;
+  restoreMode?: CsoRestoreMode | null;
 }
 
 export interface CsoCustomFieldValue {
@@ -241,6 +245,7 @@ export interface CsoDocumentDetail extends CsoDocumentSummary {
     createdAt: string;
   } | null;
   copiedFrom: { id: string; reference: string | null; title: string } | null;
+  restoreMode?: CsoRestoreMode | null;
 }
 
 export interface CsoReferenceChange {
@@ -339,9 +344,10 @@ export interface SharedWithMeItem {
   message: string | null;
   allowDownload: boolean;
   canDownload: boolean;
+  canPreview: boolean;
   createdAt: string;
   sharedBy: UserLabel | null;
-  document: { id: string; title: string; reference: string | null; vesselId: string | null; updatedAt: string };
+  document: { id: string; title: string; reference: string | null; vesselId: string | null; updatedAt: string; fileKind: string | null };
 }
 
 export interface ApprovalsInbox {

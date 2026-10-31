@@ -289,7 +289,7 @@ export class QuotationsService {
     const rows = await this.prisma.quotationSelection.findMany({
       where: { quotationLine: { quotation: { rfqId } } },
       orderBy: { selectedAt: 'asc' },
-      include: { quotationLine: { select: { id: true, rfqLineId: true, unitPrice: true, quotation: { select: { id: true, currency: true, supplier: { select: { id: true, name: true } } } } } } },
+      include: { quotationLine: { select: { id: true, rfqLineId: true, unitPrice: true, unit: true, quotation: { select: { id: true, currency: true, supplier: { select: { id: true, name: true } } } } } } },
     });
     const names = await this.core.userNames(rows.map((r) => r.selectedById));
     return rows.map((r) => ({ ...r, selectedByName: names.get(r.selectedById) ?? null }));

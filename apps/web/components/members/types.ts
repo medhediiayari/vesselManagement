@@ -1,3 +1,4 @@
+import type { CreatorLabel } from '@/components/amc/created-by';
 import type { StoredFileDto } from '@/lib/api';
 
 /**
@@ -155,6 +156,9 @@ export interface MemberAssignment {
   joinPort: string | null;
   signOffPort: string | null;
   relievesAssignmentId: string | null;
+  createdAt: string;
+  /** Auteur de la planification (nom + rôles) */
+  createdBy: CreatorLabel | null;
   updatedAt: string;
 }
 
@@ -275,8 +279,35 @@ export interface CrewAssignmentDto {
   };
   /** Roster : fiche consultable par l'utilisateur (ADM-070) */
   memberAccessible?: boolean;
+  createdAt: string;
+  /** Auteur de la planification (liste, détail, roster) */
+  createdBy?: CreatorLabel | null;
   warnings?: string[];
+  /** Sous-ensemble de `warnings` issu du contrôle des certificats (déjà affiché avant confirmation) */
+  certificateWarnings?: string[];
 }
+
+/** GET /crew-assignments/certificate-check — avertissement non bloquant avant planification / embarquement. */
+export type CrewCertificateFlag = 'EXPIRED' | 'EXPIRES_BEFORE_VOYAGE_END' | 'EXPIRY_UNKNOWN';
+
+export interface CrewCertificateCheckItem {
+  certificateId: string;
+  typeName: string;
+  typeCode: string;
+  number: string | null;
+  expiryOn: string | null;
+  flag: CrewCertificateFlag;
+}
+
+export type CrewCertificateCheck =
+  | { available: false; reason: string }
+  | {
+      available: true;
+      /** Fin de la période contrôlée (AAAA-MM-JJ), null si inconnue */
+      end: string | null;
+      items: CrewCertificateCheckItem[];
+      counts: { expired: number; expiringBeforeEnd: number; expiryUnknown: number };
+    };
 
 export interface Roster {
   vessel: VesselMini & { status: string };

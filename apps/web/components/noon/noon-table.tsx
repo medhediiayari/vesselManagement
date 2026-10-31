@@ -10,6 +10,12 @@ import type { NoonListItem } from './types';
 
 const utc = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')} UTC`;
 
+/** Ancienneté d'un brouillon depuis sa dernière modification (audit FLT-25). */
+function draftAge(updatedAt: string): string {
+  const days = Math.floor((Date.now() - Date.parse(updatedAt)) / 86_400_000);
+  return days <= 0 ? "modifié aujourd'hui" : `inchangé depuis ${days} j`;
+}
+
 /** Liste dense des Noon Reports (pagination serveur par curseur). */
 export function NoonTable({
   rows,
@@ -50,7 +56,7 @@ export function NoonTable({
     },
     { key: 'type', header: 'Type', cell: (r) => REPORT_TYPE_LABELS[r.reportType] ?? r.reportType },
     ...(showVessel ? [{ key: 'vessel', header: 'Navire', cell: (r: NoonListItem) => r.vessel.name, hideBelow: 'md' as const }] : []),
-    ...(showVoyage ? [{ key: 'voyage', header: 'Voyage', cell: (r: NoonListItem) => <span className="tabular">{r.voyage.reference}</span>, hideBelow: 'md' as const }] : []),
+    ...(showVoyage ? [{ key: 'voyage', header: 'Voyage', cell: (r: NoonListItem) => <span className="ref">{r.voyage.reference}</span>, hideBelow: 'md' as const }] : []),
     { key: 'pos', header: 'Position', cell: (r) => <span className="whitespace-nowrap text-xs tabular">{formatPosition(r.latitude, r.longitude)}</span>, hideBelow: 'lg' },
     {
       key: 'speed',
@@ -63,7 +69,21 @@ export function NoonTable({
       ),
       hideBelow: 'sm',
     },
-    { key: 'status', header: 'Statut', cell: (r) => <NoonStatusBadge status={r.status} /> },
+    {
+      key: 'status',
+      header: 'Statut',
+      cell: (r) => (
+        <span>
+          <NoonStatusBadge status={r.status} />
+          {r.status === 'DRAFT' && (
+            <span className="mt-0.5 block whitespace-nowrap text-xs text-ink-muted">
+              {draftAge(r.updatedAt)}
+              {r.pendingIssues ? <span className="text-warn"> · {r.pendingIssues} point(s) à compléter</span> : null}
+            </span>
+          )}
+        </span>
+      ),
+    },
     { key: 'rev', header: 'Rév.', cell: (r) => <span className="tabular">{r.currentRevisionNo || '—'}</span>, align: 'right', hideBelow: 'sm' },
   ];
   return (

@@ -87,6 +87,41 @@ export interface CertificateTypeRef {
   allowMultiple: boolean;
 }
 
+export interface FolderRef {
+  id: string;
+  name: string;
+}
+
+/** Dossier de l'arborescence (liste plate, hiérarchie par parentId) */
+export interface CertificateFolderDto extends FolderRef {
+  parentId: string | null;
+  sortOrder: number;
+  /** Certificats actifs visibles classés directement dans ce dossier */
+  certificateCount: number;
+  /**
+   * Gestionnaires des dossiers : tous les certificats classés directement ici (archivés et hors
+   * périmètre compris), c'est-à-dire ceux qu'une suppression déplacerait ; null sinon.
+   */
+  filedCount?: number | null;
+}
+
+/** Catégorie de l'arborescence ; id null = portée par un type mais hors référentiel (non modifiable) */
+export interface CertificateCategoryDto {
+  id: string | null;
+  name: string;
+  sortOrder: number;
+  typeCount: number;
+  subjectKinds: SubjectKind[];
+  certificateCount: number;
+}
+
+/** Destinataires de la demande d'approbation si elle était soumise maintenant */
+export interface ApproversDto {
+  selfApprove: boolean;
+  validatorsConfigured: number;
+  approvers: { id: string; displayName: string; jobTitle: string | null }[];
+}
+
 export interface CertificateListItem {
   id: string;
   subjectKind: SubjectKind;
@@ -94,6 +129,7 @@ export interface CertificateListItem {
   memberId: string | null;
   subject: Subject;
   type: CertificateTypeRef;
+  folder: FolderRef | null;
   hasCurrentRevision: boolean;
   currentNumber: string | null;
   currentExpiryKind: ExpiryKind | null;
@@ -196,6 +232,8 @@ export interface RequestDto {
   decidedAt: string | null;
   decisionComment: string | null;
   cancelReason: string | null;
+  /** Demande annulée : auteur réel (demandeur, supervision) ou annulation automatique */
+  cancellation?: { by: UserRef | null; mode: 'REQUESTER' | 'SUPERVISOR' | 'AUTOMATIC' | 'UNKNOWN' } | null;
   duplicatedFromId: string | null;
   attachmentId: string | null;
   escalatedAt: string | null;
@@ -244,6 +282,10 @@ export interface CertificatePermissions {
   canPreviewCurrent: boolean;
   canDownloadCurrent: boolean;
   canDownloadArchived: boolean;
+  /** certificates.folders.manage : classer dans un dossier de l'arborescence */
+  canFile: boolean;
+  /** Renouvellement publié sans approbation (self_approve ou renewal.self_approve) */
+  canSelfApproveRenewal: boolean;
 }
 
 export interface CertificateDetail {
@@ -258,6 +300,7 @@ export interface CertificateDetail {
     reminderPolicy: { id: string; name: string; thresholdsDays: number[]; frequency: ReminderFrequency } | null;
     validatorsConfigured: number;
   };
+  folder: FolderRef | null;
   validity: ValidityStatus | null;
   validityLabel: string | null;
   daysToExpiry: number | null;
@@ -336,6 +379,12 @@ export interface PrincipalDto {
   principalType: PrincipalType;
   principalId: string;
   label: string | null;
+}
+
+/** POST /certificate-types/validators/check : personnes désignées ayant le droit d'approuver */
+export interface ValidatorCheckDto {
+  effectiveApprovers: number;
+  principals: { principalType: PrincipalType; principalId: string; approverCount: number }[];
 }
 
 export interface CertificateTypeDto {

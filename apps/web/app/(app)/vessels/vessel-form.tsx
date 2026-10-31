@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { ApiError, api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
-import { Field, Input, Textarea } from '@/components/ui/field';
+import { Field, Input, Select, Textarea } from '@/components/ui/field';
 
 export interface VesselDto {
   id: string;
@@ -50,17 +50,38 @@ const FIELDS: { key: keyof VesselDto; label: string; hint?: string; type?: strin
   { key: 'managerName', label: 'Gestionnaire' },
   { key: 'ownerName', label: 'Armateur / propriétaire' },
   { key: 'builder', label: 'Chantier' },
-  { key: 'yearBuilt', label: 'Année de construction', type: 'number' },
+  { key: 'yearBuilt', label: 'Année de construction', type: 'number', hint: `Au plus ${new Date().getFullYear() + 3}` },
   { key: 'grossTonnage', label: 'Jauge brute (GT)' },
-  { key: 'netTonnage', label: 'Jauge nette (NT)' },
+  { key: 'netTonnage', label: 'Jauge nette (NT)', hint: 'Au plus la jauge brute' },
   { key: 'deadweight', label: 'Port en lourd (DWT, t)' },
   { key: 'lengthOverall', label: 'Longueur hors-tout (m)' },
   { key: 'beam', label: 'Largeur (m)' },
   { key: 'summerDraft', label: "Tirant d'eau été (m)" },
-  { key: 'timezone', label: 'Fuseau horaire (IANA)', hint: 'ex. Africa/Tunis' },
+  { key: 'timezone', label: 'Fuseau horaire (IANA)', hint: 'Heure bord affichée dans l’en-tête' },
   { key: 'contactEmail', label: 'E-mail de bord', type: 'email' },
   { key: 'contactPhone', label: 'Téléphone de bord' },
 ];
+
+/** Libellés des champs (historique de la fiche navire). */
+export const VESSEL_FIELD_LABELS: Record<string, string> = Object.fromEntries([
+  ...FIELDS.map((f) => [f.key, f.label]),
+  ['notes', 'Notes'],
+]);
+
+/** Fuseaux IANA du navigateur : une liste fermée évite les fautes de frappe (audit FLT-01). */
+function timeZoneOptions(): string[] {
+  const list = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
+  return Array.from(new Set(['UTC', ...list]));
+}
+
+function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Création / modification des informations officielles (historisées dans l'audit). */
 export function VesselFormDialog({
@@ -79,6 +100,7 @@ export function VesselFormDialog({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [zones] = useState(timeZoneOptions);
 
   async function save() {
     setBusy(true);
@@ -128,13 +150,35 @@ export function VesselFormDialog({
       <div className="grid gap-3 sm:grid-cols-2">
         {FIELDS.map((f) => (
           <Field key={f.key} label={f.label} hint={f.hint} error={errors[f.key]} required={f.required} htmlFor={`v-${f.key}`}>
-            <Input
-              id={`v-${f.key}`}
-              type={f.type ?? 'text'}
-              value={values[f.key] ?? ''}
-              invalid={!!errors[f.key]}
-              onChange={(e) => setValues((s) => ({ ...s, [f.key]: e.target.value }))}
-            />
+            {f.key === 'timezone' ? (
+              <Select
+                id={`v-${f.key}`}
+                value={String(values.timezone || 'UTC')}
+                invalid={!!errors.timezone}
+                onChange={(e) => setValues((s) => ({ ...s, timezone: e.target.value }))}
+              >
+                {/* Valeur historique hors liste : conservée et signalée pour être corrigée */}
+                {values.timezone && !zones.includes(String(values.timezone)) && (
+                  <option value={String(values.timezone)}>
+                    {String(values.timezone)}
+                    {isValidTimeZone(String(values.timezone)) ? '' : ' (invalide)'}
+                  </option>
+                )}
+                {zones.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <Input
+                id={`v-${f.key}`}
+                type={f.type ?? 'text'}
+                value={values[f.key] ?? ''}
+                invalid={!!errors[f.key]}
+                onChange={(e) => setValues((s) => ({ ...s, [f.key]: e.target.value }))}
+              />
+            )}
           </Field>
         ))}
         <Field label="Notes" className="sm:col-span-2" htmlFor="v-notes">

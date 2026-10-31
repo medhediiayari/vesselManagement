@@ -165,7 +165,7 @@ export function DeliveryNoteDialog({ open, onOpenChange, poId: initialPoId }: { 
                   <Input value={number} onChange={(e) => setNumber(e.target.value)} maxLength={80} />
                 </FormField>
                 <FormField label="Date de livraison" required>
-                  <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+                  <Input type="date" value={date} max={todayInput()} onChange={(e) => setDate(e.target.value)} />
                 </FormField>
               </div>
               <div className="overflow-x-auto rounded-md border border-line">

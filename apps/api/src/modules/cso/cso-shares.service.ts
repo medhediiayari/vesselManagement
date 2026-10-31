@@ -174,17 +174,41 @@ export class CsoSharesService {
       select: {
         ...SHARE_SELECT,
         document: {
-          select: { id: true, libraryId: true, folderId: true, status: true, authorId: true, inheritAcl: true, title: true, reference: true, vesselId: true, updatedAt: true },
+          select: {
+            id: true,
+            libraryId: true,
+            folderId: true,
+            status: true,
+            authorId: true,
+            inheritAcl: true,
+            title: true,
+            reference: true,
+            vesselId: true,
+            updatedAt: true,
+            currentVersionId: true,
+          },
         },
       },
     });
     const page = toPage(rows, p);
     const { visible, eff } = await this.access.filterVisibleDocuments(ctx, page.items.map((r) => r.document));
     const visibleIds = new Set(visible.map((d) => d.id));
-    const sharers = await this.prisma.user.findMany({
-      where: { id: { in: [...new Set(page.items.map((r) => r.sharedById))] } },
-      select: { id: true, displayName: true },
-    });
+    const [sharers, currentVersions] = await Promise.all([
+      this.prisma.user.findMany({
+        where: { id: { in: [...new Set(page.items.map((r) => r.sharedById))] } },
+        select: { id: true, displayName: true },
+      }),
+      this.prisma.csoVersion.findMany({
+        where: { id: { in: visible.map((d) => d.currentVersionId).filter((x): x is string => !!x) } },
+        select: { id: true, fileId: true },
+      }),
+    ]);
+    const files = await this.prisma.storedFile.findMany({ where: { id: { in: currentVersions.map((v) => v.fileId) } }, select: { id: true, kind: true } });
+    // Type du fichier officiel : l'aperçu n'est proposé que pour un PDF / une image (CSO-14)
+    const kindOf = (versionId: string | null) => {
+      const v = currentVersions.find((x) => x.id === versionId);
+      return (v && files.find((f) => f.id === v.fileId)?.kind) ?? null;
+    };
     return {
       nextCursor: page.nextCursor,
       items: page.items
@@ -194,9 +218,17 @@ export class CsoSharesService {
           message: r.message,
           allowDownload: r.allowDownload,
           canDownload: !!eff.get(r.documentId)?.download,
+          canPreview: !!eff.get(r.documentId)?.preview,
           createdAt: r.createdAt,
           sharedBy: sharers.find((u) => u.id === r.sharedById) ?? null,
-          document: { id: r.document.id, title: r.document.title, reference: r.document.reference, vesselId: r.document.vesselId, updatedAt: r.document.updatedAt },
+          document: {
+            id: r.document.id,
+            title: r.document.title,
+            reference: r.document.reference,
+            vesselId: r.document.vesselId,
+            updatedAt: r.document.updatedAt,
+            fileKind: kindOf(r.document.currentVersionId),
+          },
         })),
     };
   }
