@@ -32,4 +32,4 @@ fi
 
 $COMPOSE ps
 set -a; . deploy/.env.prod; set +a
-echo "Application : https://$DOMAIN"
+echo "Application : https://$DOMAIN$([ "${HTTPS_PORT:-443}" = "443" ] || echo ":$HTTPS_PORT")"

@@ -25,6 +25,8 @@ ssh ubuntu@135.125.207.107
 cd /opt/amc && bash deploy/first-deploy.sh
 ```
 
+**Serveur partagé** : si les ports 80 et 443 sont déjà pris par un autre service, par exemple nginx, `server-setup.sh` laisse ce service intact. L'application est alors publiée sur un port HTTPS libre (8443, sinon 9443 ou 10443), par exemple `https://135.125.207.107:8443`. Le script n'active jamais le pare-feu ; si ufw est déjà actif, il y ajoute seulement ce port.
+
 Pour l'argument de `server-setup.sh` :
 - **avec une adresse IP**, le certificat est auto-signé, et le navigateur affiche un avertissement à accepter une fois ;
 - **avec un nom de domaine**, le certificat Let's Encrypt est valide : `sudo bash /opt/amc/deploy/server-setup.sh amc.exemple.com admin@exemple.com`.
