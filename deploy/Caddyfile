@@ -1,0 +1,13 @@
+# Reverse proxy TLS. {$TLS} vaut :
+#   - un e-mail  → certificat Let's Encrypt (DOMAIN = nom de domaine pointant vers le serveur) ;
+#   - « internal » → certificat auto-signé (DOMAIN = adresse IP, environnement de test).
+# Le web Next.js relaie lui-même /api/v1 vers l'API : une seule origine, cookies de session same-origin.
+{$DOMAIN} {
+	tls {$TLS}
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy web:3100
+}

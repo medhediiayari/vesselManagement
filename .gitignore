@@ -16,3 +16,6 @@ apps/api/openapi.json
 .playwright-mcp/
 .claude/
 backups/
+# Secrets et sauvegardes du serveur de production
+deploy/.env.prod
+deploy/backups/

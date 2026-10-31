@@ -1,0 +1,6 @@
+# Fichiers exécutés sur Linux (serveur, conteneurs) : toujours en fins de ligne LF
+*.sh text eol=lf
+*.sql text eol=lf
+Caddyfile text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
