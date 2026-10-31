@@ -92,16 +92,26 @@ chmod 600 "$ENV_FILE"
 # --- Exposition --------------------------------------------------------------------------------------
 if [ "$MODE" = nginx ]; then
   SITE=/etc/nginx/sites-available/amc
+  # Relance : copie de sauvegarde, restaurée si la nouvelle configuration est refusée par nginx -t
+  [ -f "$SITE" ] && cp "$SITE" "$SITE.bak"
   sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__WEB_PORT__|$WEB_PORT|g" "$APP_DIR/deploy/nginx-amc.conf" > "$SITE"
   ln -sf "$SITE" /etc/nginx/sites-enabled/amc
-  nginx -t
+  if ! nginx -t; then
+    [ -f "$SITE.bak" ] && cp "$SITE.bak" "$SITE" || rm -f /etc/nginx/sites-enabled/amc
+    echo "Configuration nginx refusée : site « amc » restauré, nginx non rechargé" >&2
+    exit 1
+  fi
   systemctl reload nginx
   if ! command -v certbot >/dev/null 2>&1; then
     apt-get install -y certbot python3-certbot-nginx || snap install --classic certbot
   fi
-  # Ajoute le bloc HTTPS et la redirection HTTP → HTTPS dans le site « amc » uniquement
-  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
-  systemctl reload nginx
+  # Bloc HTTPS + redirection HTTP → HTTPS dans le site « amc » uniquement ; un certificat encore valide est
+  # réinstallé tel quel (--keep-until-expiring), sans nouvelle demande à Let's Encrypt
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect --keep-until-expiring
+  # HTTP/2 (certbot ne l'active pas) : une seule directive, après le « listen 443 ssl; » IPv4
+  grep -q "http2 on;" "$SITE" || sed -i '0,/listen 443 ssl;/s//listen 443 ssl;
+    http2 on;/' "$SITE"
+  if nginx -t; then systemctl reload nginx; else echo "nginx -t refuse HTTP/2 : vérifier $SITE" >&2; exit 1; fi
 fi
 
 # Pare-feu : seulement si ufw est DÉJÀ actif (ne jamais l'activer sur un serveur partagé)
