@@ -109,8 +109,10 @@ if [ "$MODE" = nginx ]; then
   # réinstallé tel quel (--keep-until-expiring), sans nouvelle demande à Let's Encrypt
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect --keep-until-expiring
   # HTTP/2 (certbot ne l'active pas) : une seule directive, après le « listen 443 ssl; » IPv4
-  grep -q "http2 on;" "$SITE" || sed -i '0,/listen 443 ssl;/s//listen 443 ssl;
-    http2 on;/' "$SITE"
+  if ! grep -q "http2 on;" "$SITE"; then
+    awk '!done && /listen 443 ssl;/ { print; print "    http2 on;"; done=1; next } { print }' "$SITE" > "$SITE.tmp" \
+      && mv "$SITE.tmp" "$SITE"
+  fi
   if nginx -t; then systemctl reload nginx; else echo "nginx -t refuse HTTP/2 : vérifier $SITE" >&2; exit 1; fi
 fi
 
