@@ -19,17 +19,18 @@ ssh ubuntu@135.125.207.107
 sudo apt-get update && sudo apt-get install -y git
 sudo mkdir -p /opt/amc && sudo chown ubuntu:ubuntu /opt/amc
 git clone https://github.com/medhediiayari/vesselManagement.git /opt/amc
-sudo bash /opt/amc/deploy/server-setup.sh 135.125.207.107
+sudo bash /opt/amc/deploy/server-setup.sh amc.vessels.castpro-tn.com ton@email.com
 exit                                 # reconnexion nécessaire pour le groupe docker
 ssh ubuntu@135.125.207.107
 cd /opt/amc && bash deploy/first-deploy.sh
 ```
 
-**Serveur partagé** : si les ports 80 et 443 sont déjà pris par un autre service, par exemple nginx, `server-setup.sh` laisse ce service intact. L'application est alors publiée sur un port HTTPS libre (8443, sinon 9443 ou 10443), par exemple `https://135.125.207.107:8443`. Le script n'active jamais le pare-feu ; si ufw est déjà actif, il y ajoute seulement ce port.
+`server-setup.sh` choisit le mode d'exposition :
+- **nginx occupe déjà 80/443 et on donne un domaine** : c'est le cas de `135.125.207.107`. Le script ajoute un site nginx dédié (`/etc/nginx/sites-available/amc`, modèle `deploy/nginx-amc.conf`) et obtient le certificat Let's Encrypt avec certbot. L'application écoute alors sur `127.0.0.1:8095`, et les autres sites nginx ne sont pas modifiés.
+- **80/443 occupés et on donne une adresse IP** : Caddy publie un port HTTPS libre (8443…), avec un certificat auto-signé.
+- **80/443 libres** : Caddy écoute sur 80/443.
 
-Pour l'argument de `server-setup.sh` :
-- **avec une adresse IP**, le certificat est auto-signé, et le navigateur affiche un avertissement à accepter une fois ;
-- **avec un nom de domaine**, le certificat Let's Encrypt est valide : `sudo bash /opt/amc/deploy/server-setup.sh amc.exemple.com admin@exemple.com`.
+Le script n'active jamais le pare-feu. Il est relançable : il garde les secrets et met seulement à jour l'adresse et le mode d'exposition.
 
 ## 3. Mises à jour
 Sur le poste : `git push`. Puis, sur le serveur : `cd /opt/amc && bash deploy/update.sh`.
